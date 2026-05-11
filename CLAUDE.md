@@ -37,3 +37,11 @@ proper Sync Impact Report and version bump.
 
 Use the Specify Kit slash commands (`/speckit-*`) for spec-driven development. Quality
 gates (cargo fmt, clippy `-D warnings`, tests) MUST pass before merging any MR.
+
+## Active feature
+
+<!-- SPECKIT START -->
+Current implementation plan: [`specs/001-minimal-sync-daemon/plan.md`](./specs/001-minimal-sync-daemon/plan.md).
+For technical context, dependencies, project structure, and constitution check status, read
+that plan first.
+<!-- SPECKIT END -->
