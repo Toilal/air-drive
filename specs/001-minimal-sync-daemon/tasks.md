@@ -149,7 +149,11 @@ empty Drive and non-empty local.
   drive_change_cursor is empty
 - [ ] T040 [US1] Implement `setup` subcommand in `src/cli/setup.rs`: orchestrates `link →
   map → start --initial-sync` with interactive prompts (use `dialoguer`); forwards the
-  first non-zero exit
+  first non-zero exit; supports `--install-service` to drop `~/.config/systemd/user/air-drive.service`
+- [ ] T040b [P] [US1] Implement `unlink` subcommand in `src/cli/unlink.rs` (FR-018, FR-019):
+  refuses (exit 8) if the lock is held by a live daemon; otherwise deletes `tokens.json`,
+  clears the `account` and `folder_mapping` rows from `state.db`, leaves the local watched
+  folder contents untouched. Honors `--yes` to skip the confirmation prompt
 
 **Checkpoint**: US1 fully functional. Initial reconciliation works end-to-end against a
 mocked Drive and a real local filesystem; the integration tests T024-T029 pass.

@@ -92,13 +92,31 @@ USAGE: air-drive status [--json]
 
 Exit codes: `0` always (status output is the carrier of any error info).
 
+### `air-drive unlink`
+
+Remove the linked account, delete the OAuth tokens file, and clear the folder mapping from the state DB. The local watched folder contents are **not** touched.
+
+```text
+USAGE: air-drive unlink [--yes]
+```
+
+| Flag | Description |
+|---|---|
+| `--yes`, `-y` | Skip the interactive confirmation prompt (useful for scripts). |
+
+Exit codes: `0` on success, `8` if a daemon is currently running against this config (refuse to unlink while running; the user must `air-drive pause` and stop the daemon first).
+
 ### `air-drive setup`
 
 Interactive wrapper: runs `link`, prompts for the local and remote folders, runs `map`, then `start --initial-sync`. Intended for first-time use.
 
 ```text
-USAGE: air-drive setup
+USAGE: air-drive setup [--install-service]
 ```
+
+| Flag | Description |
+|---|---|
+| `--install-service` | After successful setup, install the systemd user unit `~/.config/systemd/user/air-drive.service` and enable it for the current user. |
 
 Exit codes: forwards the first non-zero exit code from the underlying commands.
 

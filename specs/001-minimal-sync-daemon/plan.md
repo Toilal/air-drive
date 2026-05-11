@@ -84,7 +84,8 @@ src/
 │   ├── pause.rs           # `air-drive pause` — flip pause flag via control socket
 │   ├── resume.rs          # `air-drive resume` — flip pause flag via control socket
 │   ├── status.rs          # `air-drive status [--json]` — read state, return summary
-│   └── setup.rs           # `air-drive setup` — interactive wrapper over link+map+start
+│   ├── unlink.rs          # `air-drive unlink` — remove account, tokens, mapping
+│   └── setup.rs           # `air-drive setup` — interactive wrapper (link+map+start, optional service install)
 ├── daemon/
 │   ├── mod.rs             # Orchestrates watcher + drive_poller + reconciler
 │   ├── lock.rs            # Single-instance file lock (FR-017)
