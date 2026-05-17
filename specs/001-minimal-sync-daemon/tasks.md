@@ -55,8 +55,8 @@ complete.**
 - [ ] T009 Implement crate-wide `Error` enum in `src/error.rs` using `thiserror`. Variants at minimum: `Io`, `Sqlite`, `Drive`, `Oauth`, `Config`, `Rclone`, `Lock`, `Mapping`. Add a `Result<T> = std::result::Result<T, Error>` alias in `src/lib.rs` (or `src/main.rs` if no lib split)
 - [ ] T010 [P] Implement XDG path resolver in `src/config/paths.rs` using the `directories` crate. Exposes `config_dir() -> PathBuf` (config + state), `cache_dir() -> PathBuf` (rclone binary cache), `runtime_dir() -> PathBuf` (control socket); each function MUST also accept an override from a `--config-dir` global CLI flag
 - [ ] T011 [P] Implement TOML config load/save in `src/config/mod.rs`: `Config` struct mirroring `contracts/config.md` ([oauth], [mapping], [daemon], [rclone] sections), `Config::load(path)` returning `Ok(Default)` when the file is absent, `Config::save(path)` writing 0644
-- [ ] T012 [P] Implement `tracing` init in `src/observability.rs` (new file): `init_tracing(verbose: u8, log_file: Option<&Path>)` setting up `tracing-subscriber` with an `EnvFilter` (default level = warn, `-v`/`-vv`/`-vvv` lifts to info/debug/trace) and an optional file layer
-- [ ] T013 Implement SQLite connection + migrations runner in `src/state/mod.rs`: `Db::open(path)` opens with `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`, `PRAGMA foreign_keys = ON`, then runs `migrate_to_latest()` which checks the `schema_version` table and applies migrations from `src/state/schema.rs` forward
+- [ ] T012 [P] Implement `tracing` init in `src/observability.rs` (new file): `init_tracing(verbose: u8, log_file: Option<&Path>)` setting up `tracing-subscriber` with an `EnvFilter` (default level = warn, `-v`/`-vv`/`-vvv` lifts to info/debug/trace) and an optional file layer. Operation log lines MUST include the fields `event`, `op_id`, `item_id` (when applicable), and `relative_path` (when applicable) — provide a shared `op_span!(...)` macro for callers (FR-025)
+- [ ] T013 Implement SQLite connection + migrations runner in `src/state/mod.rs`: `Db::open(path)` opens with `PRAGMA journal_mode = WAL`, `PRAGMA synchronous = NORMAL`, `PRAGMA foreign_keys = ON`, then runs `migrate_to_latest()` which checks the `schema_version` table and applies migrations from `src/state/schema.rs` forward. If `schema_version.version` is **greater** than the binary's known migrations (FR-024), `Db::open` MUST return `Error::Config` with a clear "upgrade required" message and the daemon MUST refuse to start. Downgrades are not supported
 - [ ] T014 Implement schema v1 in `src/state/schema.rs` with `MIGRATIONS: &[&str]` containing the CREATE TABLE statements for `schema_version`, `account`, `folder_mapping`, `sync_item` (+ unique index on `(mapping_id, relative_path)`), `pending_operation` (+ index on `next_attempt_at`), `conflict_record`, `drive_change_cursor`. SQL exactly as described in `data-model.md`
 - [ ] T015 [P] Implement Account repository in `src/state/accounts.rs`: `upsert(email, linked_at) -> AccountId`, `get_single() -> Option<Account>`, `touch_linked_at()`. Pure SQL via `rusqlite`
 - [ ] T016 [P] Implement FolderMapping repository in `src/state/mapping.rs`: `upsert(account_id, local_path, remote_folder_id, remote_folder_name) -> MappingId`, `get_single() -> Option<FolderMapping>`
@@ -129,6 +129,11 @@ empty Drive and non-empty local.
   binary via `tokio::process::Command`. Subcommands used: `copyto`, `moveto`,
   `--metadata-mapper`-free invocations only. Implements every method of the `SyncEngine`
   trait. Captures stderr on failure for `Error::Rclone { stderr }`
+- [ ] T034b [US1] Implement download staging in `src/engine/rclone.rs` (FR-010): downloads
+  MUST land first in `<local_root>/.air-drive-partial/<op-id>` and only be `rename(2)`'d
+  into the final path after the download completes and the md5 matches the remote. Failed
+  downloads MUST delete the staging file. Add an orphan-cleanup pass on daemon startup
+  that removes any leftover entries under `.air-drive-partial/`
 - [ ] T035 [P] [US1] Implement MD5+size fingerprint helper in `src/reconcile/fingerprint.rs`:
   `compute_local(path) -> (size, md5)` (streamed read, hashes via `md-5` crate), `from_remote(file: &RemoteFile) -> Option<(size, md5)>` (None when Drive omits md5 — e.g. native Docs)
 - [ ] T036 [US1] Implement initial reconciliation in `src/reconcile/mod.rs`: walks the local
@@ -139,7 +144,9 @@ empty Drive and non-empty local.
   already covered
 - [ ] T037 [US1] Implement `link` subcommand in `src/cli/link.rs`: load config, drive the
   OAuth flow, persist tokens, write the account row. Exit `0` on success, `2` on OAuth
-  error, `3` on network failure
+  error, `3` on network failure. If the `[oauth].client_id` override is configured but
+  rejected by Google during the OAuth dance (invalid or unauthorised), exit `2` with a
+  message naming the offending config key (FR-001)
 - [ ] T038 [US1] Implement `map` subcommand in `src/cli/map.rs`: canonicalise the local
   path, create it if missing, resolve the remote path/URL/ID to a Drive file ID via
   `drive::metadata::resolve_path`, persist the mapping
@@ -200,6 +207,9 @@ re-transferring content; network drop + reconnect drains the queued ops.
 - [ ] T051 [P] [US2] Implement debounce in `src/watch/debounce.rs`: 200 ms window per logical
   path, coalesces burst events (editor saves emit Create/Remove/Create) into a single final
   state per path
+- [ ] T051b [P] [US2] Skip symlinks and special files (FR-013) in `src/watch/mod.rs`: on
+  each event, `lstat` the path and drop it (with a `tracing::info` notice) if the file type
+  is neither regular file nor directory. Covered by a unit test in the same file
 - [ ] T052 [P] [US2] Implement Drive change poller in `src/drive/changes.rs`: long-lived
   task that loops on `changes.list?pageToken=...&supportsAllDrives=false`, persists
   `newStartPageToken` after each page, filters results to descendants of the mapped remote
@@ -207,15 +217,33 @@ re-transferring content; network drop + reconnect drains the queued ops.
 - [ ] T053 [US2] Implement reconciler in `src/reconcile/mod.rs` (extending T036): a function
   `reconcile_local(WatchEvent) -> Vec<Operation>` and `reconcile_remote(RemoteChange) ->
   Vec<Operation>` that consult the sync_item table to decide whether an event represents a
-  real change or a known echo (a remote change we caused via our own upload)
+  real change or a known echo (a remote change we caused via our own upload). Native Google
+  Docs / Sheets / Slides (`mimeType` starts with `application/vnd.google-apps.` other than
+  `folder`) MUST NOT produce a `sync_item` row; log a one-line notice the first time each is
+  seen and silently ignore subsequent observations (FR-011)
+- [ ] T053b [P] [US2] Handle EACCES on local read (FR-021) in `src/reconcile/mod.rs`: catch
+  `io::ErrorKind::PermissionDenied` per file, surface as a transient `last_error.kind="io"`
+  in status, do not block the rest of the queue, re-enqueue for the next 5 min safety-net
+  cycle
 - [ ] T054 [US2] Implement conflict detection in `src/reconcile/conflict.rs` (FR-006, Q2
   clarification): on a local + remote change that both diverge from the last fingerprint,
-  rename the local file to `<stem>.conflict-<UTC-ts>.<ext>`, insert a `conflict_record`, and
-  let the next cycle upload both the canonical (remote-derived) and the conflict file
+  rename the local file to `<stem>.conflict-YYYYMMDDTHHMMSSZ.<ext>`, insert a
+  `conflict_record`, and let the next cycle upload both the canonical (remote-derived) and
+  the conflict file
+- [ ] T054b [US2] Clear conflict records on user resolution (FR-006) in
+  `src/reconcile/conflict.rs`: when a watcher event reports the deletion or rename of either
+  side of a conflict (canonical or `.conflict-*` companion), remove the corresponding
+  `conflict_record` row
 - [ ] T055 [P] [US2] Implement op dispatcher in `src/daemon/runtime.rs`: pulls due ops from
   the queue (`PendingOperation::next_due`), executes via the `SyncEngine`, handles
-  exponential backoff + jitter on failure, updates the queue row accordingly. Single-worker
-  serialisation per `sync_item_id`
+  exponential back-off with jitter on failure (initial 1 s, doubling, max 60 s, ±20 %
+  jitter, 10 attempts before the op is moved to a quarantine state requiring manual
+  resolution — FR-012), updates the queue row accordingly. Single-worker serialisation per
+  `sync_item_id`
+- [ ] T055b [US2] Handle ENOSPC mid-download (FR-022) in `src/daemon/runtime.rs`: on
+  `io::ErrorKind::StorageFull` during a download, abort, delete the staging file under
+  `.air-drive-partial/<op-id>` (T034b), surface in status as transient
+  `last_error.kind="io"`, apply FR-012 back-off
 - [ ] T056 [US2] Implement daemon event loop in `src/daemon/mod.rs`: spawns the watcher, the
   change poller, the safety-net timer (5 min reconciliation), and the op dispatcher; routes
   events through `reconcile_*` into the `PendingOperation` queue. Backed by `tokio::select!`
@@ -268,7 +296,9 @@ status; killing the daemon with `-9` and restarting resumes without data loss.
 - [ ] T066 [P] [US3] Implement `pause` subcommand in `src/cli/pause.rs`: connects to the
   control socket, sends `pause`, exits 0 on ack, 7 if no daemon
 - [ ] T067 [P] [US3] Implement `resume` subcommand in `src/cli/resume.rs`: same as T066
-  with `resume`
+  with `resume`. On the daemon side, `resume` MUST trigger a **single convergence pass**
+  against the current filesystem and remote state; it MUST NOT replay individual events
+  that arrived during the pause (FR-015)
 - [ ] T068 [US3] Implement status snapshot assembly in `src/cli/status.rs`: reads from
   state.db (pending counts via `PendingOperation::count_by_op`, last sync from a new
   `sync_log` table OR a single `state_meta.last_sync_at` row — pick the latter), reads the
@@ -277,13 +307,25 @@ status; killing the daemon with `-9` and restarting resumes without data loss.
 - [ ] T069 [P] [US3] Implement `status --json` output in `src/cli/status.rs`: serialises
   the snapshot into a `serde` struct that matches `contracts/status.schema.json` v1 exactly;
   the daemon's resolved `RcloneBinary` is exposed under `rclone.{path,version,source}`
-- [ ] T070 [US3] Implement re-link-required state in `src/daemon/mod.rs` (FR-009): when
-  `yup-oauth2::Authenticator::token` returns a refresh failure, set the daemon state to
-  `blocked { kind: auth }`, surface in status, do NOT exit; resume sync on successful
-  re-link (detected by the auth module on next call)
+- [ ] T070 [US3] Implement re-link-required state in `src/daemon/mod.rs` (FR-009):
+  distinguish **transient refresh failures** (network error or 5xx from the identity
+  provider — retry with the FR-012 back-off, stay in the current state) from **hard refresh
+  failures** (`invalid_grant`, HTTP 400 — set state to `blocked { kind: auth }`, surface in
+  status, do NOT exit; resume sync on successful re-link detected by the auth module on next
+  call)
+- [ ] T070b [US3] Detect "watched remote folder deleted on Drive" (FR-020) in
+  `src/drive/changes.rs`: when `changes.list` reports the mapped remote folder ID with
+  `removed: true` or `trashed: true`, transition the daemon to state `blocked` with
+  `last_error.kind="remote"`, surface a clear error in status, and stop dispatching new
+  operations. Do NOT delete local content
 - [ ] T071 [US3] Wire single-instance lock acquisition into `start` (FR-017): acquire
   `Lock` from T023 at the very top of `cli::start`; on `Error::Lock { pid }`, print a
   user-facing message and return exit code 6
+- [ ] T071b [US3] Verify local watched path on startup (FR-023) in `src/cli/start.rs`:
+  after the lock is acquired, `std::fs::metadata` the configured `local_path`. If it does
+  not exist or is not a directory, transition to state `blocked` with
+  `last_error.kind="mapping"`, print a clear error pointing the user at `air-drive map`,
+  and do NOT auto-recreate the directory
 - [ ] T072 [US3] Implement crash recovery on startup in `src/daemon/mod.rs` (FR-010,
   SC-005): on `start`, before launching watchers, walk the `pending_operation` queue and
   re-enqueue any rows whose `next_attempt_at` is in the past; treat in-flight ops (none on
@@ -311,8 +353,16 @@ feature is "done".
   measures p95 latencies. Fails CI if outside budget
 - [ ] T077 [P] Memory smoke for SC-007: a 24-hour soak in CI's nightly job, asserting RSS
   stays under 200 MB
+- [ ] T077b [P] Quota verification smoke for SC-008 in `tests/perf/quota.rs` (CI-gated):
+  run the daemon idle on a mapping with one synthetic change per minute for 10 min;
+  assert the count of HTTP requests to the Drive API mock stays below 10 % of the
+  1 000 req / 100 s per-user budget over the window
 - [ ] T078 Update root `README.md` with a status section linking to `specs/001-minimal-sync-daemon/spec.md`,
   `plan.md`, and `quickstart.md`
+- [ ] T078b [P] Ship a `air-drive.service` **systemd user unit template** (FR-014) under
+  `assets/systemd/air-drive.service`. The `setup --install-service` command (T040) copies
+  it to `~/.config/systemd/user/air-drive.service` and runs
+  `systemctl --user enable --now air-drive.service`
 - [ ] T079 [P] Add `--version` output to include the resolved rclone version when present
   (after the lock is acquired and the binary resolved)
 
