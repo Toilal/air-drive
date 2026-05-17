@@ -1,0 +1,64 @@
+name: e2e (real Drive + rclone)
+
+# Why this lives in a separate workflow from `ci.yml`:
+#
+# - Burns Drive API quota and shared scratch space, so we only run it on `push to
+#   main` (merges) and on demand (`workflow_dispatch`), never on every PR.
+# - Needs real credentials (GitHub Secrets) that we don't want exposed to forked
+#   PR builds.
+# - Installs `rclone` from apt — the cost is acceptable here but pointless to
+#   pay on the mocked CI runs.
+#
+# See `tests/e2e/README.md` for the setup procedure (GCP OAuth project, refresh
+# token acquisition, secret names).
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
+# Make sure two e2e runs against the same Drive account never overlap — they each
+# claim a unique sub-folder via UUID but back-to-back runs share the quota budget,
+# and the stale-folder sweep is more useful when runs are serialised.
+concurrency:
+  group: e2e-drive
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: cargo test --test rclone_drive -- --ignored
+    runs-on: ubuntu-latest
+    # Don't expose secrets to forks. The default permissions are already minimal,
+    # but make the intent explicit.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone
+          rclone version
+
+      - name: Run e2e suite
+        env:
+          # Tokens.json content — a JSON blob holding the refresh token. NEVER
+          # logged; the harness writes it to disk at 0600 inside a tempdir.
+          AIR_DRIVE_E2E_TOKENS: ${{ secrets.AIR_DRIVE_E2E_TOKENS }}
+          AIR_DRIVE_E2E_CLIENT_ID: ${{ secrets.AIR_DRIVE_E2E_CLIENT_ID }}
+          AIR_DRIVE_E2E_PARENT_FOLDER_ID: ${{ secrets.AIR_DRIVE_E2E_PARENT_FOLDER_ID }}
+        run: cargo test --test rclone_drive -- --ignored --nocapture
+
+      # If the e2e suite fails partway through, the per-run Drive sub-folder may
+      # leak. The next successful run sweeps anything older than 24 h
+      # (`common::sweep_stale`), so we don't add explicit cleanup here.

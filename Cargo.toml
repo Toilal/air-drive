@@ -98,3 +98,11 @@ hex = "0.4"
 [[test]]
 name = "initial_sync"
 path = "tests/integration/initial_sync.rs"
+
+# End-to-end suite that hits the real Google Drive API + the real rclone binary.
+# Every test is `#[ignore]`d so the default `cargo test` skips them; CI runs them
+# via `cargo test --test rclone_drive -- --ignored` from a dedicated workflow with
+# the secrets piped through env vars. See tests/e2e/README.md.
+[[test]]
+name = "rclone_drive"
+path = "tests/e2e/rclone_drive.rs"
