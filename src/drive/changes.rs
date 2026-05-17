@@ -13,7 +13,7 @@
 //! first time get added to the cache so subsequent files under them resolve in
 //! O(1).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +39,12 @@ pub struct RemoteChange {
     pub removed: bool,
     /// Full file resource for non-removal events (id, name, mime, size, md5, parents).
     pub file: Option<FileSnapshot>,
+    /// Path of the changed file under the mapped local root, computed by the
+    /// poller from the file's parent chain. `None` when `removed` is true or
+    /// when the file is outside the watched tree (the poller filters those out
+    /// before forwarding; this field is only populated for in-scope creations
+    /// and updates).
+    pub relative_path: Option<String>,
 }
 
 /// Snapshot of a Drive file as returned by `changes.list`. Mirrors the relevant
@@ -78,10 +84,14 @@ pub async fn run(
     interval: Duration,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    // `known_descendant_ids` caches "this id is somewhere under the watched
-    // root". Seeded with the root itself; folders get added as we discover them.
-    let descendants: Arc<Mutex<HashSet<String>>> =
-        Arc::new(Mutex::new(HashSet::from([root_id.clone()])));
+    // Cache: Drive file id → relative path under `root_id`. Seeded with the
+    // root itself (empty path). Used both to recognise descendants in O(1)
+    // after the first visit and to compute the relative path the reconciler
+    // needs to place a file on the local filesystem.
+    let path_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::from([(
+        root_id.clone(),
+        String::new(),
+    )])));
 
     loop {
         tokio::select! {
@@ -138,25 +148,25 @@ pub async fn run(
             let removed = c.get("removed").and_then(|v| v.as_bool()).unwrap_or(false);
             let file = c.get("file").and_then(parse_snapshot);
 
-            let in_scope = if removed {
+            let relative_path = if removed {
                 // Removed events have no file resource — we trust the daemon's
                 // own state (sync_item) to know whether the id was relevant.
                 // Always forward, the reconciler filters by sync_item lookup.
-                true
+                None
             } else if let Some(f) = &file {
-                is_descendant(&http, f, &root_id, &descendants).await
+                match descendant_path(&http, f, &root_id, &path_cache).await {
+                    Some(rel) => Some(rel),
+                    None => continue, // out of scope
+                }
             } else {
-                false
-            };
-            if !in_scope {
                 continue;
-            }
+            };
 
             // Track folders we've now identified as descendants so siblings
             // resolve via the cache hit instead of an extra walk.
-            if let Some(f) = &file {
+            if let (Some(f), Some(rel)) = (&file, &relative_path) {
                 if f.is_folder() {
-                    descendants.lock().await.insert(f.id.clone());
+                    path_cache.lock().await.insert(f.id.clone(), rel.clone());
                 }
             }
 
@@ -165,6 +175,7 @@ pub async fn run(
                     file_id,
                     removed,
                     file,
+                    relative_path,
                 })
                 .await
                 .is_err()
@@ -181,53 +192,42 @@ pub async fn run(
 }
 
 /// Walk `file`'s parent chain (one `files.get` per hop) until we either reach
-/// `root_id` or exhaust the chain. Adds intermediate folder IDs to the cache so
-/// future calls hit O(1).
-async fn is_descendant(
+/// `root_id` (file is in scope) or exhaust the chain (out of scope). Returns
+/// the file's path relative to `root_id` when in scope, `None` otherwise.
+///
+/// As we walk, we cache every (folder-id → relative-path) pair we see so
+/// future calls under the same subfolders hit O(1) and so the reconciler can
+/// reuse the cached path without re-walking. The cache lock is held only
+/// while reading or mutating the map — every HTTP call happens between lock
+/// releases, so the poller never blocks other tasks on network I/O.
+async fn descendant_path(
     http: &DriveHttp,
     file: &FileSnapshot,
-    root_id: &str,
-    cache: &Arc<Mutex<HashSet<String>>>,
-) -> bool {
-    let mut to_check: Vec<String> = file.parents.clone();
-    let mut visited: HashMap<String, ()> = HashMap::new();
-    let mut path: Vec<String> = Vec::new();
+    _root_id: &str,
+    cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Option<String> {
+    let first_parent = file.parents.first()?.clone();
+    // Walk up, collecting (id, name) for every folder above the file that we
+    // don't already have cached. The chain is in "child-first" order — we
+    // reverse it once we know the file is in scope.
+    let mut chain: Vec<(String, String)> = Vec::new();
+    let mut current_id = first_parent;
 
-    while let Some(parent_id) = to_check.pop() {
-        if visited.contains_key(&parent_id) {
-            continue;
-        }
-        visited.insert(parent_id.clone(), ());
-
-        {
-            let cache_guard = cache.lock().await;
-            if cache_guard.contains(&parent_id) {
-                // Found a known descendant ancestor. Promote every folder we
-                // walked through.
-                drop(cache_guard);
-                let mut cache_guard = cache.lock().await;
-                for id in path.into_iter() {
-                    cache_guard.insert(id);
-                }
-                return parent_id == root_id || cache_guard.contains(root_id);
-            }
-        }
-
-        if parent_id == root_id {
-            // Reached the root directly. Promote the walked folders.
-            let mut cache_guard = cache.lock().await;
-            for id in path.into_iter() {
-                cache_guard.insert(id);
-            }
-            cache_guard.insert(root_id.to_owned());
-            return true;
-        }
-
-        // Cache miss — fetch this parent's parents.
-        let raw = match metadata::get_file_raw(http, &parent_id, "id,parents").await {
-            Ok(v) => v,
-            Err(_) => return false,
+    loop {
+        // Cache hit on the current parent?
+        let cached_prefix: Option<String> = {
+            let guard = cache.lock().await;
+            guard.get(&current_id).cloned()
         };
+        if let Some(prefix) = cached_prefix {
+            return Some(assemble_path(&prefix, &chain, &file.name, cache).await);
+        }
+
+        // Cache miss — fetch this parent's own (name, parents) and walk further up.
+        let raw = metadata::get_file_raw(http, &current_id, "id,name,parents")
+            .await
+            .ok()?;
+        let name = raw.get("name").and_then(|v| v.as_str())?.to_owned();
         let next_parents: Vec<String> = raw
             .get("parents")
             .and_then(|v| v.as_array())
@@ -237,14 +237,51 @@ async fn is_descendant(
                     .collect()
             })
             .unwrap_or_default();
-        if next_parents.is_empty() {
-            // Reached a parentless node that isn't our root → out of scope.
-            return false;
-        }
-        path.push(parent_id);
-        to_check.extend(next_parents);
+        chain.push((current_id.clone(), name));
+        let Some(next) = next_parents.into_iter().next() else {
+            // Walked off the top without hitting `root_id` → out of scope.
+            return None;
+        };
+        current_id = next;
     }
-    false
+}
+
+/// Glue helper for [`descendant_path`]. Builds the final relative path from a
+/// cached prefix, the walked-but-uncached chain (child-first order), and the
+/// file's own name. Promotes the walked entries into the cache so the next
+/// call under the same subtree resolves in one hop.
+async fn assemble_path(
+    cached_prefix: &str,
+    chain: &[(String, String)],
+    file_name: &str,
+    cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> String {
+    // Build path piece by piece. `chain` is child-first; the final path goes
+    // prefix / chain[last].name / chain[last-1].name / ... / chain[0].name / file_name.
+    let mut parts: Vec<&str> = Vec::with_capacity(chain.len() + 2);
+    if !cached_prefix.is_empty() {
+        parts.push(cached_prefix);
+    }
+    let walked: Vec<&str> = chain
+        .iter()
+        .rev()
+        .map(|(_id, name)| name.as_str())
+        .collect();
+    parts.extend(walked);
+    parts.push(file_name);
+    let path = parts.join("/");
+
+    // Cache every intermediate folder we passed through.
+    let mut guard = cache.lock().await;
+    let mut acc = cached_prefix.to_owned();
+    for (id, name) in chain.iter().rev() {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(name);
+        guard.insert(id.clone(), acc.clone());
+    }
+    path
 }
 
 /// Parse a `file` JSON value from a `changes.list` entry into a [`FileSnapshot`].

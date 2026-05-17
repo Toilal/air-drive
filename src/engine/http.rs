@@ -101,25 +101,15 @@ impl SyncEngine for HttpEngine {
         Self::parse_remote_file(&response)
     }
 
-    async fn download(&self, remote_id: &str, local: &Path) -> Result<()> {
-        // FR-010: stage under the watched root's `.air-drive-partial/`. We treat
-        // `local`'s parent as the eventual home, and find the watched root by walking
-        // up until we hit the local-side mapping root — but the engine doesn't know
-        // about that root. Pragmatic fallback: stage in the *destination*'s parent
-        // directory under its own `.air-drive-partial/`. Reconciler-orchestrated
-        // downloads always live inside the watched tree, so this preserves the FR-010
-        // intent without threading the root through every call.
-        let root = local.parent().ok_or_else(|| {
-            Error::Mapping(format!(
-                "download target has no parent: {}",
-                local.display()
-            ))
-        })?;
+    async fn download(&self, remote_id: &str, local: &Path, local_root: &Path) -> Result<()> {
+        // FR-010: every download — even nested files (`dir/sub/leaf.txt`) — stages
+        // under the SAME `<local_root>/.air-drive-partial/` directory so the
+        // start-up orphan-sweep finds all leftovers in one place.
         let op_id = format!(
             "{remote_id}-{}",
             local.file_name().and_then(|s| s.to_str()).unwrap_or("dest")
         );
-        let staging_path = staging::stage_path(root, &op_id)?;
+        let staging_path = staging::stage_path(local_root, &op_id)?;
 
         let path = format!("files/{remote_id}");
         let body = match self.http.get_bytes(&path, &[("alt", "media")]).await {

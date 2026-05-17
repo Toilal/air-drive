@@ -138,6 +138,16 @@ async fn execute(
                 Err(e) => return Err(e),
             };
 
+            // Echo suppression: the reconciler enqueues an Upload for every local
+            // Modified/Created event without computing the fingerprint first
+            // (cf. `reconcile::continuous::apply_local`). If the file's current
+            // hash matches what `sync_item` already records, the event was either
+            // a no-op `mv`/`touch` or the watcher-echo of a Download we just
+            // performed — skip the engine call entirely.
+            if item.md5.as_deref() == Some(&md5) && item.size == Some(size) {
+                return Ok(());
+            }
+
             match item.remote_id.as_deref() {
                 Some(rid) => {
                     engine.update(rid, &local).await?;
@@ -176,7 +186,7 @@ async fn execute(
                     }
                 })?;
             }
-            engine.download(remote_id, &local).await?;
+            engine.download(remote_id, &local, local_root).await?;
 
             let (size, md5) = fingerprint::compute_local(&local).await?;
             items::update_fingerprint(db.connection(), item.id, Some(size), Some(&md5), unix_now())

@@ -11,13 +11,12 @@
 //! The functions are stateless beyond the database — they don't talk to the
 //! engine; the dispatcher (`daemon::runtime`) does.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::json;
 
 use crate::drive::changes::RemoteChange;
 use crate::error::{Error, Result};
-use crate::reconcile::fingerprint;
 use crate::state::Db;
 use crate::state::items::{self, ItemKind, ItemState, NewSyncItem};
 use crate::state::mapping::MappingId;
@@ -45,26 +44,15 @@ pub async fn apply_local(
                 return Ok(());
             }
             let rel = strip_root(&p, local_root)?;
-            // EACCES (FR-021): a permission denied is logged + retried on the
-            // next safety-net cycle. We surface as a warn here so the daemon
-            // doesn't crash; the file simply doesn't get queued this tick.
-            let (size, md5) = match fingerprint::compute_local(&p).await {
-                Ok(v) => v,
-                Err(Error::Io(io)) if io.kind() == std::io::ErrorKind::PermissionDenied => {
-                    tracing::warn!(path = %p.display(), "EACCES on local read; will retry");
-                    return Ok(());
-                }
-                Err(e) => return Err(e),
-            };
-
+            // No fingerprint computation here — the dispatcher will hash the file
+            // right before uploading. Doing it twice (once for echo suppression,
+            // once for persistence) burns CPU on big files; deferring the check
+            // means we may enqueue an upload that turns out to be a no-op, but
+            // the dispatcher detects that case via the same md5 comparison and
+            // skips the engine call. The fingerprint we persist is then
+            // guaranteed to match the bytes we actually pushed.
             match items::get_by_relative_path(db.connection(), mapping_id, &rel).await? {
                 Some(item) => {
-                    // Echo suppression: if our fingerprint matches what's already
-                    // recorded, the modify event was either a no-op or the echo
-                    // of a download we just performed.
-                    if item.md5.as_deref() == Some(&md5) && item.size == Some(size) {
-                        return Ok(());
-                    }
                     ops::enqueue(
                         db.connection(),
                         item.id,
@@ -82,8 +70,10 @@ pub async fn apply_local(
                             relative_path: rel.clone(),
                             kind: ItemKind::File,
                             remote_id: None,
-                            size: Some(size),
-                            md5: Some(md5),
+                            // Leave size/md5 unset — the dispatcher populates them
+                            // after the upload completes.
+                            size: None,
+                            md5: None,
                             local_inode: None,
                             last_synced_at: 0,
                             state: ItemState::PendingLocal,
@@ -219,14 +209,19 @@ pub async fn apply_remote(
             .await?;
         }
         None => {
-            // Brand-new remote file. Insert sync_item + enqueue Download.
-            // Relative path heuristic for the MVP: just the file's name. A
-            // deeper hierarchy needs parent walking (Phase 4 follow-up).
+            // Brand-new remote file. The poller already walked the parent chain
+            // and packaged the full relative path into `change.relative_path`,
+            // so a nested create (`docs/spec.txt` on Drive) lands at the right
+            // place locally rather than being flattened to `<root>/spec.txt`.
+            let rel = change
+                .relative_path
+                .clone()
+                .unwrap_or_else(|| file.name.clone());
             let new_id = items::insert(
                 db.connection(),
                 &NewSyncItem {
                     mapping_id,
-                    relative_path: file.name.clone(),
+                    relative_path: rel.clone(),
                     kind: ItemKind::File,
                     remote_id: Some(file.id.clone()),
                     size: Some(remote_size),
@@ -241,7 +236,7 @@ pub async fn apply_remote(
                 "remote_id": file.id,
                 "size": remote_size,
                 "md5": remote_md5,
-                "relative_path": file.name,
+                "relative_path": rel,
             })
             .to_string();
             ops::enqueue(
@@ -265,14 +260,3 @@ fn strip_root(absolute: &Path, root: &Path) -> Result<String> {
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/"))
 }
-
-#[allow(dead_code)] // future use by conflict path
-fn parent_dir(rel: &str) -> &str {
-    match rel.rsplit_once('/') {
-        Some((p, _)) => p,
-        None => "",
-    }
-}
-
-#[allow(dead_code)]
-fn _unused(_p: PathBuf) {} // placeholder kept while continuous reconciler grows

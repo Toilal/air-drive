@@ -294,6 +294,50 @@ async fn us2_2_remote_create_propagates_locally() {
 }
 
 // ---------------------------------------------------------------------------
+// T046b — nested remote create propagates to the matching local subfolder
+// (regression: the poller used to flatten the path to `<file_name>` instead
+// of walking the parent chain back to the watched root)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_2_nested_remote_create_propagates_with_full_path() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let docs = mock.insert_folder(Some(&root_id), "docs");
+    let notes = mock.insert_folder(Some(&docs), "notes");
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(&fx, &mock, &root_id, &[]);
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Create a file two levels deep on Drive. It must land at
+    // `<local_dir>/docs/notes/alpha.md`, NOT `<local_dir>/alpha.md`.
+    let payload = b"deep payload";
+    mock.insert_file(Some(&notes), "alpha.md", payload);
+
+    let landed = wait_until(T_REMOTE_TO_LOCAL, || async {
+        std::fs::read(fx.local_dir.join("docs/notes/alpha.md"))
+            .map(|got| got == payload)
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        landed,
+        "nested remote create should land at docs/notes/alpha.md within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // And NOT at the flattened path.
+    assert!(
+        !fx.local_dir.join("alpha.md").exists(),
+        "regression: file ended up flattened at the root instead of under docs/notes/"
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // T047 — remote modify propagates locally
 // ---------------------------------------------------------------------------
 

@@ -85,9 +85,13 @@ pub trait SyncEngine: Send + Sync + 'static {
     async fn update(&self, remote_id: &str, local: &Path) -> Result<RemoteFile>;
 
     /// Fetch a Drive file to a local path. The implementation MUST stage the bytes
-    /// somewhere temporary and atomically rename into `local` only after verification
-    /// (FR-010).
-    async fn download(&self, remote_id: &str, local: &Path) -> Result<()>;
+    /// under `<local_root>/.air-drive-partial/<op-id>` and atomically rename into
+    /// `local` only after the bytes are fully written (FR-010, T034b). `local_root`
+    /// is the watched folder root — passing it explicitly means staged downloads of
+    /// nested files (`dir/sub/file.txt`) still land in the single root-level
+    /// `.air-drive-partial/` rather than scattered through the tree where the
+    /// orphan-sweep can't find them on the next start-up.
+    async fn download(&self, remote_id: &str, local: &Path, local_root: &Path) -> Result<()>;
 
     /// Move and/or rename a remote file. Used for FR-005 (no re-upload on rename).
     async fn move_remote(&self, remote_id: &str, new_parent_id: &str, new_name: &str)

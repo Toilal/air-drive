@@ -148,7 +148,7 @@ pub async fn initial(
         if let Some(parent) = local_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        engine.download(&remote.id, &local_path).await?;
+        engine.download(&remote.id, &local_path, local_root).await?;
         record_synced_item(
             db,
             mapping_id,

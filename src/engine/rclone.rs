@@ -196,12 +196,19 @@ impl SyncEngine for RcloneEngine {
         })
     }
 
-    async fn download(&self, remote_id: &str, local: &Path) -> Result<()> {
+    async fn download(&self, remote_id: &str, local: &Path, local_root: &Path) -> Result<()> {
         let op_id = format!(
             "{remote_id}-{}",
             local.file_name().and_then(|s| s.to_str()).unwrap_or("dest")
         );
-        let staging_path = staging::stage_path(&self.local_root, &op_id)?;
+        // Prefer the explicitly threaded `local_root`; fall back to the engine's
+        // configured root if the caller passed an empty path (defensive).
+        let staging_root: &Path = if local_root.as_os_str().is_empty() {
+            &self.local_root
+        } else {
+            local_root
+        };
+        let staging_path = staging::stage_path(staging_root, &op_id)?;
 
         let mut cmd = self.base_command().await?;
         cmd.arg("copyto")
