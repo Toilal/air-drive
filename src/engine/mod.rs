@@ -9,7 +9,10 @@
 //!
 //! The MVP ships exactly one implementation: [`rclone::RcloneEngine`].
 
+pub mod http;
 pub mod rclone;
+pub mod rclone_path;
+pub mod staging;
 
 use std::path::Path;
 

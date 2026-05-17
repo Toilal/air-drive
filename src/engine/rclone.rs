@@ -1,11 +1,37 @@
-//! `RcloneEngine` — the initial [`SyncEngine`] implementation.
+//! `RcloneEngine` — the production [`SyncEngine`] backed by the `rclone` binary.
 //!
-//! Drives a resolved `rclone` binary via `tokio::process::Command`. Actual subprocess
-//! invocation will be wired in T034 (Phase 3, US1). This module currently exposes the
-//! struct skeleton so the reconciler can be written against the trait.
+//! Each call shells out via `tokio::process::Command` with `--config /dev/null` and the
+//! Drive backend configured via `RCLONE_CONFIG_*` env vars so we don't have to touch
+//! the user's own `rclone.conf`. The full set of overrides used:
+//!
+//! | env var                              | value                                |
+//! |--------------------------------------|--------------------------------------|
+//! | `RCLONE_CONFIG_AIRDRIVE_TYPE`        | `drive`                              |
+//! | `RCLONE_CONFIG_AIRDRIVE_TOKEN`       | `{"access_token":"<bearer>",…}`      |
+//! | `RCLONE_CONFIG_AIRDRIVE_CLIENT_ID`   | optional override from `[oauth]`     |
+//! | `RCLONE_CONFIG_AIRDRIVE_SCOPE`       | `drive.file`                         |
+//!
+//! Subcommands:
+//!
+//! - **upload**: `rclone copyto <local> airdrive:<parent_id>/<name> --drive-root-folder-id <parent_id>`
+//! - **download**: stages via [`super::staging`] then `rclone copyto airdrive:<id> <stage>` (FR-010)
+//! - **move_remote**: `rclone moveto airdrive:<old_id> airdrive:<new_parent>/<new_name>`
+//! - **delete_remote**: `rclone delete airdrive:<id>` (Drive trash)
+//!
+//! **Status**: subprocess wiring is in place. OAuth token handoff to rclone is the
+//! sole follow-up item — rclone wants a full token JSON (access + refresh + expiry),
+//! while `TokenProvider::token` returns only the access string. The structure below
+//! formats a JSON-shaped value with a placeholder refresh; production deploys MUST
+//! revisit this for long-running operations (tracked separately).
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
 
+use tokio::process::Command;
+
+use crate::drive::auth::TokenProvider;
+use crate::engine::staging;
 use crate::engine::{RemoteFile, SyncEngine};
 use crate::error::{Error, Result};
 
@@ -35,72 +61,212 @@ pub struct RcloneBinary {
     pub source: RcloneSource,
 }
 
+/// Conventional remote name we use in every rclone invocation. Configured per-call
+/// via `RCLONE_CONFIG_AIRDRIVE_*` env vars (see module docs).
+const REMOTE_NAME: &str = "airdrive";
+
 /// rclone-backed sync engine.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RcloneEngine {
     binary: RcloneBinary,
+    token_provider: Arc<dyn TokenProvider>,
+    client_id: Option<String>,
+    /// Watched local root, used as the base for [`staging::stage_path`] on downloads.
+    local_root: PathBuf,
+}
+
+impl std::fmt::Debug for RcloneEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RcloneEngine")
+            .field("binary", &self.binary)
+            .field("client_id", &self.client_id)
+            .field("local_root", &self.local_root)
+            .finish()
+    }
 }
 
 impl RcloneEngine {
-    /// Build a new engine around an already-resolved [`RcloneBinary`].
+    /// Build a new engine.
     ///
-    /// Resolution (config → PATH → cache → download) is performed in
-    /// `engine::rclone_path` (T033 — Phase 3 US1).
-    pub fn new(binary: RcloneBinary) -> Self {
-        Self { binary }
+    /// - `binary` — already resolved via [`super::rclone_path::resolve`].
+    /// - `token_provider` — supplies the access token rclone is configured with on
+    ///   every invocation. Refresh is the provider's responsibility.
+    /// - `client_id` — optional OAuth client_id override from `Config.oauth.client_id`.
+    /// - `local_root` — watched local folder; used as the base for staged downloads.
+    pub fn new(
+        binary: RcloneBinary,
+        token_provider: Arc<dyn TokenProvider>,
+        client_id: Option<String>,
+        local_root: PathBuf,
+    ) -> Self {
+        Self {
+            binary,
+            token_provider,
+            client_id,
+            local_root,
+        }
     }
 
     /// Borrow the resolved binary descriptor (for status output).
     pub fn binary(&self) -> &RcloneBinary {
         &self.binary
     }
+
+    /// Build a `Command` with the conventional remote configured via env. Caller adds
+    /// the subcommand-specific args (`copyto`, `moveto`, `delete`, …) and runs it.
+    async fn base_command(&self) -> Result<Command> {
+        let token = self.token_provider.token().await?;
+        let token_json = format_token_json(&token);
+        let mut cmd = Command::new(&self.binary.path);
+        cmd.env("RCLONE_CONFIG_AIRDRIVE_TYPE", "drive")
+            .env("RCLONE_CONFIG_AIRDRIVE_TOKEN", token_json)
+            .env("RCLONE_CONFIG_AIRDRIVE_SCOPE", "drive.file");
+        if let Some(cid) = &self.client_id {
+            cmd.env("RCLONE_CONFIG_AIRDRIVE_CLIENT_ID", cid);
+        }
+        cmd.arg("--config")
+            .arg("/dev/null") // never touch the user's rclone.conf
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Ok(cmd)
+    }
+
+    /// Spawn `cmd` and capture stdout/stderr. Maps non-zero exits to [`Error::Rclone`].
+    async fn run(&self, mut cmd: Command) -> Result<Vec<u8>> {
+        let out = cmd.output().await.map_err(|e| Error::Rclone {
+            stderr: format!("spawn rclone: {e}"),
+        })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            return Err(Error::Rclone { stderr });
+        }
+        Ok(out.stdout)
+    }
+}
+
+/// Encode the access token in the JSON shape rclone's Drive backend expects.
+///
+/// Rclone needs `{"access_token": ..., "token_type": "Bearer", "expiry": ...}` at
+/// minimum. We have only the access string from [`TokenProvider`], so we emit a
+/// short-lived envelope. For long-running operations rclone may try to refresh — when
+/// that path matters we'll need to surface the refresh token too (tracked as follow-up
+/// in the module docs).
+fn format_token_json(access_token: &str) -> String {
+    let escaped = access_token.replace('\\', "\\\\").replace('"', "\\\"");
+    // Expiry well in the future so rclone treats the token as fresh.
+    format!(
+        "{{\"access_token\":\"{escaped}\",\"token_type\":\"Bearer\",\"expiry\":\"2099-01-01T00:00:00Z\"}}"
+    )
 }
 
 #[async_trait::async_trait]
 impl SyncEngine for RcloneEngine {
-    async fn upload(
-        &self,
-        _local: &Path,
-        _remote_parent_id: &str,
-        _name: &str,
-    ) -> Result<RemoteFile> {
-        // T034 (Phase 3 US1) — wire `rclone copyto <local> drive:<parent>/<name>`.
-        Err(Error::Rclone {
-            stderr: "RcloneEngine::upload not implemented (pending T034)".into(),
-        })
+    async fn upload(&self, local: &Path, remote_parent_id: &str, name: &str) -> Result<RemoteFile> {
+        let mut cmd = self.base_command().await?;
+        cmd.arg("copyto")
+            .arg(local)
+            .arg(format!("{REMOTE_NAME}:{name}"))
+            .arg("--drive-root-folder-id")
+            .arg(remote_parent_id);
+        self.run(cmd).await?;
+
+        // rclone's `copyto` doesn't print the created file's metadata. Re-fetch via
+        // `rclone lsjson` to get id+size+md5. Done in a second invocation — chatty
+        // but correct, and only on the first sync (subsequent updates reuse the id).
+        let mut probe = self.base_command().await?;
+        probe
+            .arg("lsjson")
+            .arg("--hash")
+            .arg(format!("{REMOTE_NAME}:{name}"))
+            .arg("--drive-root-folder-id")
+            .arg(remote_parent_id);
+        let raw = self.run(probe).await?;
+        parse_lsjson_single(&raw)
     }
 
-    async fn download(&self, _remote_id: &str, _local: &Path) -> Result<()> {
-        // T034 — wire `rclone copyto drive:<remote_id> <staging>` then atomic rename.
-        Err(Error::Rclone {
-            stderr: "RcloneEngine::download not implemented (pending T034)".into(),
-        })
+    async fn download(&self, remote_id: &str, local: &Path) -> Result<()> {
+        let op_id = format!(
+            "{remote_id}-{}",
+            local.file_name().and_then(|s| s.to_str()).unwrap_or("dest")
+        );
+        let staging_path = staging::stage_path(&self.local_root, &op_id)?;
+
+        let mut cmd = self.base_command().await?;
+        cmd.arg("copyto")
+            .arg(format!("{REMOTE_NAME}:{remote_id}"))
+            .arg(&staging_path);
+        if let Err(e) = self.run(cmd).await {
+            staging::discard(&staging_path)?;
+            return Err(e);
+        }
+        staging::promote(&staging_path, local)?;
+        Ok(())
     }
 
     async fn move_remote(
         &self,
-        _remote_id: &str,
-        _new_parent_id: &str,
-        _new_name: &str,
+        remote_id: &str,
+        new_parent_id: &str,
+        new_name: &str,
     ) -> Result<()> {
-        // T034 — wire `rclone moveto drive:<id> drive:<parent>/<name>`.
-        Err(Error::Rclone {
-            stderr: "RcloneEngine::move_remote not implemented (pending T034)".into(),
-        })
+        let mut cmd = self.base_command().await?;
+        cmd.arg("moveto")
+            .arg(format!("{REMOTE_NAME}:{remote_id}"))
+            .arg(format!("{REMOTE_NAME}:{new_name}"))
+            .arg("--drive-root-folder-id")
+            .arg(new_parent_id);
+        self.run(cmd).await?;
+        Ok(())
     }
 
-    async fn delete_remote(&self, _remote_id: &str) -> Result<()> {
-        // T034 — wire `rclone delete drive:<id>` (or REST `files.update` with trashed=true).
-        Err(Error::Rclone {
-            stderr: "RcloneEngine::delete_remote not implemented (pending T034)".into(),
-        })
+    async fn delete_remote(&self, remote_id: &str) -> Result<()> {
+        let mut cmd = self.base_command().await?;
+        cmd.arg("delete").arg(format!("{REMOTE_NAME}:{remote_id}"));
+        self.run(cmd).await?;
+        Ok(())
     }
+}
+
+/// Parse a single entry from `rclone lsjson --hash` output. The command outputs a JSON
+/// array; we expect exactly one element here (we list a single named target).
+fn parse_lsjson_single(raw: &[u8]) -> Result<RemoteFile> {
+    let v: serde_json::Value = serde_json::from_slice(raw).map_err(|e| Error::Rclone {
+        stderr: format!("lsjson parse: {e}"),
+    })?;
+    let entry = v.get(0).ok_or_else(|| Error::Rclone {
+        stderr: "lsjson returned empty array after upload".into(),
+    })?;
+    let id = entry
+        .get("ID")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| Error::Rclone {
+            stderr: "lsjson entry missing `ID`".into(),
+        })?
+        .to_owned();
+    let mime = entry
+        .get("MimeType")
+        .and_then(|x| x.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let size = entry.get("Size").and_then(|x| x.as_i64()).unwrap_or(0);
+    let md5 = entry
+        .get("Hashes")
+        .and_then(|h| h.get("MD5"))
+        .and_then(|x| x.as_str())
+        .map(str::to_owned);
+    Ok(RemoteFile {
+        id,
+        mime,
+        size,
+        md5,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use crate::drive::auth::StaticToken;
 
     fn dummy_binary() -> RcloneBinary {
         RcloneBinary {
@@ -112,20 +278,37 @@ mod tests {
 
     #[test]
     fn engine_exposes_resolved_binary() {
-        let engine = RcloneEngine::new(dummy_binary());
+        let engine = RcloneEngine::new(
+            dummy_binary(),
+            Arc::new(StaticToken::new("tok")),
+            None,
+            PathBuf::from("/tmp/root"),
+        );
         assert_eq!(engine.binary().version, "1.65.0");
         assert_eq!(engine.binary().source, RcloneSource::Path);
     }
 
-    #[tokio::test]
-    async fn methods_return_not_implemented_for_now() {
-        // Sanity: the trait can be instantiated and called. The "not implemented"
-        // errors are placeholders until T034 (Phase 3 US1).
-        let engine: Arc<dyn SyncEngine> = Arc::new(RcloneEngine::new(dummy_binary()));
-        let err = engine
-            .download("rid", Path::new("/tmp/x"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Rclone { .. }));
+    #[test]
+    fn format_token_json_escapes_quotes_and_backslashes() {
+        let s = format_token_json(r#"abc"\xyz"#);
+        assert!(s.contains(r#""access_token":"abc\"\\xyz""#));
+        assert!(s.contains(r#""token_type":"Bearer""#));
+        assert!(s.contains("2099-01-01"));
+    }
+
+    #[test]
+    fn parse_lsjson_single_extracts_id_size_md5() {
+        let raw =
+            br#"[{"ID":"abc","MimeType":"text/plain","Size":12,"Hashes":{"MD5":"deadbeef"}}]"#;
+        let f = parse_lsjson_single(raw).unwrap();
+        assert_eq!(f.id, "abc");
+        assert_eq!(f.size, 12);
+        assert_eq!(f.md5.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_lsjson_single_rejects_empty_array() {
+        let raw = b"[]";
+        assert!(parse_lsjson_single(raw).is_err());
     }
 }

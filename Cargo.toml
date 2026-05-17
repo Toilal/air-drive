@@ -73,8 +73,28 @@ toml = "0.8"
 # XDG path resolution
 directories = "5"
 
+# RNG for jitter on retry backoff
+rand = "0.8"
+
+# Local file fingerprint (FR-007 — md5 against remote.md5Checksum)
+md-5 = "0.10"
+hex = "0.4"
+
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+# Integration test helpers
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"
+md-5 = "0.10"
+hex = "0.4"
+
+# Integration tests live under tests/integration/ rather than at the default
+# tests/ root so the layout mirrors the spec (specs/001-minimal-sync-daemon/tasks.md).
+# Each subfolder is one Cargo "test" target sharing the common harness via `mod common`.
+[[test]]
+name = "initial_sync"
+path = "tests/integration/initial_sync.rs"
