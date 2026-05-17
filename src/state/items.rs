@@ -189,6 +189,101 @@ pub async fn get_by_relative_path(
     .map_err(Into::into)
 }
 
+/// Fetch a single item by primary key.
+pub async fn get_by_id(conn: &Connection, id: ItemId) -> Result<Option<SyncItem>> {
+    conn.call(move |c| {
+        let res = c.query_row(
+            "SELECT id, mapping_id, relative_path, kind, remote_id, size, md5, \
+                    local_inode, last_synced_at, state \
+             FROM sync_item WHERE id = ?1",
+            params![id.0],
+            |row| {
+                Ok(SyncItem {
+                    id: ItemId(row.get(0)?),
+                    mapping_id: MappingId(row.get(1)?),
+                    relative_path: row.get(2)?,
+                    kind: ItemKind::from_sql(&row.get::<_, String>(3)?, 3)?,
+                    remote_id: row.get(4)?,
+                    size: row.get(5)?,
+                    md5: row.get(6)?,
+                    local_inode: row.get(7)?,
+                    last_synced_at: row.get(8)?,
+                    state: ItemState::from_sql(&row.get::<_, String>(9)?, 9)?,
+                })
+            },
+        );
+        match res {
+            Ok(i) => Ok(Some(i)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// Look up a sync item by its Drive `remote_id`.
+pub async fn get_by_remote_id(conn: &Connection, remote_id: &str) -> Result<Option<SyncItem>> {
+    let remote_id = remote_id.to_owned();
+    conn.call(move |c| {
+        let res = c.query_row(
+            "SELECT id, mapping_id, relative_path, kind, remote_id, size, md5, \
+                    local_inode, last_synced_at, state \
+             FROM sync_item WHERE remote_id = ?1",
+            params![remote_id],
+            |row| {
+                Ok(SyncItem {
+                    id: ItemId(row.get(0)?),
+                    mapping_id: MappingId(row.get(1)?),
+                    relative_path: row.get(2)?,
+                    kind: ItemKind::from_sql(&row.get::<_, String>(3)?, 3)?,
+                    remote_id: row.get(4)?,
+                    size: row.get(5)?,
+                    md5: row.get(6)?,
+                    local_inode: row.get(7)?,
+                    last_synced_at: row.get(8)?,
+                    state: ItemState::from_sql(&row.get::<_, String>(9)?, 9)?,
+                })
+            },
+        );
+        match res {
+            Ok(i) => Ok(Some(i)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// Update the Drive `remote_id` (set after a successful first-upload).
+pub async fn set_remote_id(conn: &Connection, id: ItemId, remote_id: &str) -> Result<()> {
+    let remote_id = remote_id.to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "UPDATE sync_item SET remote_id = ?1 WHERE id = ?2",
+            params![remote_id, id.0],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// Rewrite a sync item's `relative_path` (used by rename ops).
+pub async fn set_relative_path(conn: &Connection, id: ItemId, new_path: &str) -> Result<()> {
+    let new_path = new_path.to_owned();
+    conn.call(move |c| {
+        c.execute(
+            "UPDATE sync_item SET relative_path = ?1 WHERE id = ?2",
+            params![new_path, id.0],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(Into::into)
+}
+
 /// Update the (size, md5) fingerprint and `last_synced_at` for an item.
 pub async fn update_fingerprint(
     conn: &Connection,

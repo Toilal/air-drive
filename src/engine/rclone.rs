@@ -185,6 +185,17 @@ impl SyncEngine for RcloneEngine {
         parse_lsjson_single(&raw)
     }
 
+    async fn update(&self, _remote_id: &str, _local: &Path) -> Result<RemoteFile> {
+        // rclone's `copyto airdrive:<existing-name>` overwrites in place — same
+        // command as upload, but we'd need to know the file's name + parent to
+        // hand to rclone. The daemon caller has that context; threading it here
+        // is left as a follow-up (the integration suite uses HttpEngine).
+        Err(Error::Rclone {
+            stderr: "RcloneEngine::update not yet wired (use AIR_DRIVE_TEST_ENGINE=http for tests)"
+                .into(),
+        })
+    }
+
     async fn download(&self, remote_id: &str, local: &Path) -> Result<()> {
         let op_id = format!(
             "{remote_id}-{}",

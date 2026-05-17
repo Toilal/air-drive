@@ -91,6 +91,16 @@ impl SyncEngine for HttpEngine {
         Self::parse_remote_file(&response)
     }
 
+    async fn update(&self, remote_id: &str, local: &Path) -> Result<RemoteFile> {
+        let content = tokio::fs::read(local).await?;
+        let name = local.file_name().and_then(|s| s.to_str()).unwrap_or("blob");
+        let response = self
+            .http
+            .patch_upload_media(remote_id, Self::content_type_for(name), &content)
+            .await?;
+        Self::parse_remote_file(&response)
+    }
+
     async fn download(&self, remote_id: &str, local: &Path) -> Result<()> {
         // FR-010: stage under the watched root's `.air-drive-partial/`. We treat
         // `local`'s parent as the eventual home, and find the watched root by walking

@@ -12,6 +12,7 @@
 //! defer the divergence to the Phase 4 conflict path (FR-006). T029 in the
 //! integration suite covers the md5-match shortcut.
 
+pub mod continuous;
 pub mod fingerprint;
 
 use std::collections::{HashMap, HashSet, VecDeque};

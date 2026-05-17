@@ -1,28 +1,30 @@
-//! `air-drive start` (T039, FR-014, FR-017).
+//! `air-drive start` (T039, T058, FR-014, FR-017).
 //!
-//! For the MVP this only implements the `--initial-sync` path: acquire the
-//! single-instance lock, load the linked account + mapping, run the initial
-//! reconciliation, then exit cleanly. The continuous-sync loop is wired in by Phase 4
-//! (T053+).
+//! Acquires the single-instance lock, loads account + mapping, optionally runs
+//! the initial reconciliation, then enters the continuous-sync daemon loop
+//! ([`crate::daemon::run`]). The loop returns cleanly on SIGTERM / SIGINT
+//! (`daemon::wait_for_shutdown_signal`).
 
 use std::path::Path;
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
 
 use crate::cli::{ExitCode, runtime};
 use crate::config::Config;
-use crate::daemon::lock::Lock;
+use crate::daemon::{DaemonContext, lock::Lock};
 use crate::error::{Error, Result};
 use crate::reconcile;
 use crate::state::cursor;
 use crate::state::{accounts, mapping};
 
 /// Run the `start` subcommand. Honours the `--initial-sync` flag and the
-/// `--remote-poll-interval` override (the latter is plumbed through Config but no-op
-/// in the MVP — Phase 4 wires it into the change poller).
+/// `--remote-poll-interval` override.
 pub async fn run(
     config_dir_override: Option<&Path>,
     cfg: &Config,
     initial_sync: bool,
-    _remote_poll_interval: Option<u64>,
+    remote_poll_interval: Option<u64>,
     no_download_rclone: bool,
 ) -> Result<ExitCode> {
     let paths = runtime::resolve_paths(config_dir_override)?;
@@ -50,8 +52,8 @@ pub async fn run(
         ));
     };
 
-    // 3. Initial-sync gate: if the cursor has never been set and --initial-sync isn't
-    //    passed, refuse (per the spec, contracts/cli.md).
+    // 3. Initial-sync gate: if the cursor has never been set and --initial-sync
+    //    isn't passed, refuse (per contracts/cli.md).
     let cursor_exists = cursor::get(db.connection(), mapping_row.id)
         .await?
         .is_some();
@@ -61,7 +63,7 @@ pub async fn run(
         ));
     }
 
-    // 4. Build the engine and run reconciliation.
+    // 4. Build the engine + HTTP client.
     let token = runtime::build_token_provider(cfg, &paths).await?;
     let http = runtime::build_drive_http(token.clone())?;
     let local_root = std::path::PathBuf::from(&mapping_row.local_path);
@@ -75,14 +77,14 @@ pub async fn run(
     )
     .await?;
 
-    // FR-010 housekeeping: drop any leftover partials from a previous crash before
-    // staging new downloads.
+    // FR-010 housekeeping: drop any leftover partials from a previous crash.
     crate::engine::staging::cleanup_orphans(&local_root)?;
 
+    // 5. First-time initial sync.
     if initial_sync && !cursor_exists {
         reconcile::initial(
             &http,
-            engine,
+            engine.clone(),
             &db,
             mapping_row.id,
             &local_root,
@@ -91,7 +93,43 @@ pub async fn run(
         .await?;
     }
 
-    // Continuous-sync loop is Phase 4. For now `start` exits cleanly after
-    // initial-sync converges.
+    // Test-only escape hatch: integration tests that exercise only the initial-sync
+    // path (`tests/integration/initial_sync.rs`) invoke `start --initial-sync` and
+    // wait for the binary to exit via `Command::output()`. They don't want the
+    // continuous loop to kick in. The env var is documented in
+    // `tests/integration/common/mod.rs`.
+    if std::env::var("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC").as_deref() == Ok("1") {
+        return Ok(ExitCode::Ok);
+    }
+
+    // 6. Continuous loop (T058). The cursor must exist by now; if it doesn't,
+    //    something is badly wrong — surface as an error rather than silently
+    //    skipping the loop.
+    if cursor::get(db.connection(), mapping_row.id)
+        .await?
+        .is_none()
+    {
+        return Err(Error::Mapping(
+            "drive_change_cursor missing after initial-sync — refusing to enter loop".into(),
+        ));
+    }
+
+    let poll_interval = remote_poll_interval
+        .unwrap_or(cfg.daemon.remote_poll_interval_seconds)
+        .clamp(10, 60);
+
+    let ctx = DaemonContext {
+        db,
+        engine,
+        http,
+        mapping_id: mapping_row.id,
+        local_root,
+        remote_root_id: mapping_row.remote_folder_id.clone(),
+        remote_poll_interval: Duration::from_secs(poll_interval),
+    };
+
+    let cancel = CancellationToken::new();
+    crate::daemon::run(ctx, cancel).await?;
+
     Ok(ExitCode::Ok)
 }

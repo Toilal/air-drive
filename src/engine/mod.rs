@@ -78,6 +78,12 @@ pub trait SyncEngine: Send + Sync + 'static {
     /// Upload a local file to Drive.
     async fn upload(&self, local: &Path, remote_parent_id: &str, name: &str) -> Result<RemoteFile>;
 
+    /// Replace the content of an existing remote file in place. Preserves the Drive
+    /// `remote_id` (Drive comments, sharing settings, etc. survive). Used by the
+    /// continuous reconciler when a local `Modified` event fires for a file the
+    /// daemon already knows.
+    async fn update(&self, remote_id: &str, local: &Path) -> Result<RemoteFile>;
+
     /// Fetch a Drive file to a local path. The implementation MUST stage the bytes
     /// somewhere temporary and atomically rename into `local` only after verification
     /// (FR-010).

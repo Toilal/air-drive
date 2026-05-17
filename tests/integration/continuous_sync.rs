@@ -414,9 +414,11 @@ async fn us2_5_drop_and_recover_drains_queue() {
 
     let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
 
-    // Inject a 503 budget large enough that the next several attempts on every
-    // op will fail. The dispatcher's exponential backoff should retry.
-    mock.fail_next_n(40);
+    // Inject ~30 s worth of failures (5 requests with the dispatcher's 1 → 16 s
+    // exponential backoff sums to ~31 s). The spec's drop-and-recover target is
+    // 30 s; larger budgets would hit the dispatcher's MAX_ATTEMPTS guard and
+    // abandon the op for an hour, defeating the test's intent.
+    mock.fail_next_n(5);
 
     std::fs::write(fx.local_dir.join("queued-a.txt"), b"A").unwrap();
     std::fs::write(fx.local_dir.join("queued-b.txt"), b"B").unwrap();

@@ -181,6 +181,45 @@ impl DriveHttp {
         .await
     }
 
+    /// `PATCH <upload_base>/files/<file_id>?uploadType=media` — overwrites the
+    /// content of an existing remote file while keeping its Drive ID stable.
+    /// Body is the raw bytes; `content_type` is sent verbatim. Returns the file
+    /// resource Drive sends back.
+    pub async fn patch_upload_media(
+        &self,
+        file_id: &str,
+        content_type: &str,
+        content: &[u8],
+    ) -> Result<Value> {
+        let url = format!(
+            "{}/files/{file_id}?uploadType=media",
+            self.inner.upload_base_url
+        );
+        let header_value = content_type.to_owned();
+        let body = Arc::new(content.to_vec());
+        self.with_retry(|| {
+            let url = url.clone();
+            let header_value = header_value.clone();
+            let body = body.clone();
+            async move {
+                let req = self
+                    .inner
+                    .client
+                    .patch(&url)
+                    .header(
+                        CONTENT_TYPE,
+                        HeaderValue::from_str(&header_value)
+                            .map_err(|e| Error::Drive(format!("invalid content-type: {e}")))?,
+                    )
+                    .body((*body).clone());
+                let req = self.with_bearer(req).await?;
+                let resp = req.send().await.map_err(map_reqwest)?;
+                json_or_err(resp).await
+            }
+        })
+        .await
+    }
+
     /// `POST <upload_base>/files?uploadType=multipart` with a Drive-style
     /// multipart/related body: one JSON metadata part, one binary content part.
     /// Returns the parsed file resource (id, name, size, md5Checksum…).

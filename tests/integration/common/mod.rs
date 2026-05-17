@@ -300,6 +300,14 @@ impl DriveMock {
             .mount(&server)
             .await;
 
+        // PATCH /upload/drive/v3/files/{id}?uploadType=media — in-place content
+        // replacement (the daemon's `engine::HttpEngine::update` code path).
+        Mock::given(method("PATCH"))
+            .and(path_regex(r"^/upload/drive/v3/files/[^/]+$"))
+            .respond_with(MediaUpdateResponder(state.clone()))
+            .mount(&server)
+            .await;
+
         // POST /drive/v3/files — metadata-only resource creation (folders).
         Mock::given(method("POST"))
             .and(wm_path("/drive/v3/files"))
@@ -578,6 +586,27 @@ impl Respond for FilesCreateResponder {
         };
         let f = st.files.get(&id).cloned().expect("just inserted");
         ResponseTemplate::new(200).set_body_json(file_to_value(&f))
+    }
+}
+
+/// Handler for `PATCH /upload/drive/v3/files/{id}?uploadType=media` — replaces a
+/// file's content (and updates its md5/size) in place. The Drive ID is preserved.
+struct MediaUpdateResponder(Arc<Mutex<DriveState>>);
+impl Respond for MediaUpdateResponder {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let id = last_path_segment(req.url.path());
+        let mut st = self.0.lock().unwrap();
+        let Some(f) = st.files.get_mut(&id) else {
+            return ResponseTemplate::new(404);
+        };
+        f.content = req.body.clone();
+        f.md5 = hex_md5(&f.content);
+        let clone = f.clone();
+        st.change_log.push(ChangeEntry {
+            file_id: id,
+            removed: false,
+        });
+        ResponseTemplate::new(200).set_body_json(file_to_value(&clone))
     }
 }
 
@@ -886,6 +915,10 @@ pub fn air_drive_cmd(fx: &FsFixture, mock: &DriveMock) -> StdCommand {
         .env("AIR_DRIVE_DRIVE_UPLOAD_BASE_URL", mock.upload_base_url())
         .env("AIR_DRIVE_TEST_BEARER_TOKEN", "fake-test-token")
         .env("AIR_DRIVE_TEST_ENGINE", "http")
+        // Default to "exit cleanly after initial-sync" so simple
+        // Command::output() tests don't hang on the continuous loop. Tests that
+        // DO want the loop (Phase 4 / DaemonProcess) clear this env override.
+        .env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "1")
         .env("RUST_LOG", "info");
     cmd
 }
@@ -920,6 +953,10 @@ impl DaemonProcess {
     /// (file present on Drive, etc.) via [`wait_until`].
     pub async fn spawn(fx: &FsFixture, mock: &DriveMock, extra_args: &[&str]) -> Self {
         let mut cmd: tokio::process::Command = air_drive_cmd(fx, mock).into();
+        // The daemon must enter the continuous loop for Phase 4 tests, so we
+        // override the "exit after initial-sync" default that `air_drive_cmd`
+        // sets for the simpler initial_sync suite.
+        cmd.env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "0");
         cmd.arg("start");
         for a in extra_args {
             cmd.arg(a);
