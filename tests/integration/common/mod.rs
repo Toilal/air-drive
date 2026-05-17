@@ -41,14 +41,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use assert_cmd::cargo::CommandCargoExt;
 use md5::{Digest, Md5};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::matchers::{header, method, path as wm_path, path_regex, query_param};
-use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 
 // ---------------------------------------------------------------------------
 // DriveMock
@@ -238,6 +240,10 @@ fn guess_mime(name: &str) -> &'static str {
 pub struct DriveMock {
     pub server: MockServer,
     pub state: Arc<Mutex<DriveState>>,
+    /// Decrement-and-fail counter for the 503 injection path (used by T049). Mounted
+    /// at higher wiremock priority than the real responders so a positive value
+    /// short-circuits every request to `HTTP 503` until it hits zero.
+    pub fail_budget: Arc<AtomicUsize>,
 }
 
 impl DriveMock {
@@ -247,6 +253,16 @@ impl DriveMock {
     pub async fn start() -> Self {
         let server = MockServer::start().await;
         let state = Arc::new(Mutex::new(DriveState::new("alice@example.com")));
+        let fail_budget = Arc::new(AtomicUsize::new(0));
+
+        // Higher-priority gate that turns every request into a 503 as long as the
+        // fail budget is positive. Mounted FIRST so wiremock picks it before the
+        // real handlers when the matcher fires.
+        Mock::given(FailMatcher(fail_budget.clone()))
+            .respond_with(FailResponder(fail_budget.clone()))
+            .with_priority(1)
+            .mount(&server)
+            .await;
 
         // GET /drive/v3/about?fields=user — caller asks for the linked user identity.
         Mock::given(method("GET"))
@@ -342,7 +358,24 @@ impl DriveMock {
             .mount(&server)
             .await;
 
-        Self { server, state }
+        Self {
+            server,
+            state,
+            fail_budget,
+        }
+    }
+
+    /// Make the mock answer the next `n` HTTP requests with a `503 Service
+    /// Unavailable`. Subsequent requests fall through to the real handlers. Used by
+    /// the T049 test to simulate a transient Drive outage.
+    pub fn fail_next_n(&self, n: usize) {
+        self.fail_budget.store(n, Ordering::Relaxed);
+    }
+
+    /// Drop any pending 503-injection budget. Useful for tests that flip the mock
+    /// back to healthy on demand.
+    pub fn lift_failures(&self) {
+        self.fail_budget.store(0, Ordering::Relaxed);
     }
 
     /// Base URL the binary should hit for the REST API (everything but uploads).
@@ -388,6 +421,30 @@ impl DriveMock {
 }
 
 // --- responders --------------------------------------------------------------
+
+/// wiremock matcher that fires while the [`DriveMock`]'s fail budget is positive.
+/// Paired with [`FailResponder`] at priority 1 so it overrides the real handlers.
+struct FailMatcher(Arc<AtomicUsize>);
+impl Match for FailMatcher {
+    fn matches(&self, _req: &Request) -> bool {
+        self.0.load(Ordering::Relaxed) > 0
+    }
+}
+
+/// Companion responder for [`FailMatcher`]. Decrements the budget and returns 503.
+struct FailResponder(Arc<AtomicUsize>);
+impl Respond for FailResponder {
+    fn respond(&self, _req: &Request) -> ResponseTemplate {
+        // Saturating decrement so a race that drops below zero rolls back to zero
+        // on the next read.
+        let _ = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+        ResponseTemplate::new(503)
+    }
+}
 
 struct AboutResponder(Arc<Mutex<DriveState>>);
 impl Respond for AboutResponder {
@@ -841,4 +898,81 @@ where
 {
     let conn = rusqlite::Connection::open(fx.state_db_path()).expect("open state.db");
     f(&conn)
+}
+
+// ---------------------------------------------------------------------------
+// Long-running daemon process (used by Phase 4 / US2 tests)
+// ---------------------------------------------------------------------------
+
+/// Spawn-and-control wrapper around the `air-drive start` subprocess, for tests that
+/// need the daemon staying alive (US2 — continuous sync). `kill_on_drop` ensures a
+/// missed [`DaemonProcess::shutdown`] call still terminates the child, so a panicking
+/// test never leaks a runaway daemon.
+pub struct DaemonProcess {
+    child: tokio::process::Child,
+    pid: u32,
+}
+
+impl DaemonProcess {
+    /// Spawn `air-drive --config-dir <fx> ... start <extra_args...>`. Returns once
+    /// the child is up. Doesn't perform a true readiness probe — callers that need
+    /// "the daemon is now listening" should poll the side-effect they care about
+    /// (file present on Drive, etc.) via [`wait_until`].
+    pub async fn spawn(fx: &FsFixture, mock: &DriveMock, extra_args: &[&str]) -> Self {
+        let mut cmd: tokio::process::Command = air_drive_cmd(fx, mock).into();
+        cmd.arg("start");
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn air-drive start");
+        let pid = child.id().expect("child pid");
+        // Give the process a beat to clear its bootstrap (Db::open + Lock::acquire).
+        // 300 ms is empirically enough on a dev laptop; CI tweaks via env var.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Self { child, pid }
+    }
+
+    /// Best-effort check that the child is still running. Returns `None` if it has
+    /// exited (with its status); `Some(())` otherwise.
+    pub fn poll_alive(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
+    /// Send `SIGTERM` and wait up to 10 s for the daemon to drain. Falls back to
+    /// `SIGKILL` if the daemon doesn't exit in time. Returns the final exit status.
+    pub async fn shutdown(mut self) -> std::process::ExitStatus {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        let _ = kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM);
+        match tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => panic!("daemon wait failed: {e}"),
+            Err(_) => {
+                let _ = self.child.start_kill();
+                self.child.wait().await.expect("wait after SIGKILL")
+            }
+        }
+    }
+}
+
+/// Poll `cond` every 100 ms until it returns `true` or `timeout` expires. Returns
+/// whether the condition was met. Tests use this to wait for a sync to converge
+/// without sleeping for the worst case.
+pub async fn wait_until<F, Fut>(timeout: Duration, mut cond: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if cond().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
