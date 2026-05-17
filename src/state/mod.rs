@@ -151,9 +151,7 @@ mod tests {
         let (_tmp, db) = open_temp().await;
         let v: i64 = db
             .connection()
-            .call(|c| {
-                Ok(c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))?)
-            })
+            .call(|c| Ok(c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))?))
             .await
             .unwrap();
         assert_eq!(v, schema::LATEST_VERSION);
@@ -167,9 +165,7 @@ mod tests {
         let db2 = Db::open(&path).await.unwrap();
         let v: i64 = db2
             .connection()
-            .call(|c| {
-                Ok(c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))?)
-            })
+            .call(|c| Ok(c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))?))
             .await
             .unwrap();
         assert_eq!(v, schema::LATEST_VERSION);
