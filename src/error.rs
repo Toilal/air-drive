@@ -76,6 +76,15 @@ impl From<toml::ser::Error> for Error {
     }
 }
 
+impl From<tokio_rusqlite::Error> for Error {
+    fn from(value: tokio_rusqlite::Error) -> Self {
+        match value {
+            tokio_rusqlite::Error::Rusqlite(e) => Error::Sqlite(e),
+            other => Error::Config(format!("state DB connection error: {other}")),
+        }
+    }
+}
+
 /// Crate-wide `Result` alias.
 pub type Result<T> = std::result::Result<T, Error>;
 

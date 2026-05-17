@@ -46,8 +46,9 @@ serde_with = "3"
 # Google OAuth (PKCE flow for desktop apps)
 yup-oauth2 = "11"
 
-# Embedded SQLite
+# Embedded SQLite (async wrapper + the underlying rusqlite for params! and types)
 rusqlite = { version = "0.31", features = ["bundled"] }
+tokio-rusqlite = "0.5"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
