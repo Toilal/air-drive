@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::in_flight::InFlightOps;
 use crate::drive::http::DriveHttp;
 use crate::engine::SyncEngine;
 use crate::error::{Error, Result};
@@ -45,6 +46,7 @@ const MAX_BACKOFF_SECS: i64 = 60;
 ///
 /// `wake` is signalled by the reconciler whenever it enqueues a new op so the
 /// dispatcher doesn't wait the full `POLL_INTERVAL` to react.
+#[allow(clippy::too_many_arguments)] // wiring 8 collaborators by name is clearer than a struct
 pub async fn run(
     db: Db,
     engine: Arc<dyn SyncEngine>,
@@ -53,6 +55,7 @@ pub async fn run(
     remote_root_id: String,
     wake: Arc<Notify>,
     cancel: CancellationToken,
+    in_flight: InFlightOps,
 ) -> Result<()> {
     loop {
         // Drain everything that's due before sleeping.
@@ -77,7 +80,17 @@ pub async fn run(
                 .ok();
                 continue;
             }
-            match execute(&db, &engine, &http, &local_root, &remote_root_id, &op).await {
+            match execute(
+                &db,
+                &engine,
+                &http,
+                &local_root,
+                &remote_root_id,
+                &in_flight,
+                &op,
+            )
+            .await
+            {
                 Ok(()) => {
                     ops::delete(db.connection(), op.id).await.ok();
                 }
@@ -113,6 +126,7 @@ async fn execute(
     http: &DriveHttp,
     local_root: &std::path::Path,
     remote_root_id: &str,
+    in_flight: &InFlightOps,
     op: &PendingOperation,
 ) -> Result<()> {
     let item = items::get_by_id(db.connection(), op.sync_item_id)
@@ -150,17 +164,45 @@ async fn execute(
 
             match item.remote_id.as_deref() {
                 Some(rid) => {
+                    // Mark the existing remote ID as in-flight so the poller's
+                    // `apply_remote` skips the change event Drive will emit for
+                    // this update. Guard drops at function return → set cleared
+                    // automatically, even on the error path.
+                    let _guard = in_flight.mark(rid);
                     engine.update(rid, &local).await?;
+                    items::update_fingerprint(
+                        db.connection(),
+                        item.id,
+                        Some(size),
+                        Some(&md5),
+                        unix_now(),
+                    )
+                    .await?;
                 }
                 None => {
                     let (parent_rel, name) = split_parent(&item.relative_path);
                     let parent_id = ensure_remote_folder(http, remote_root_id, parent_rel).await?;
                     let rf = engine.upload(&local, &parent_id, name).await?;
+                    // Now we know the brand-new remote id — register it as
+                    // in-flight before any other state mutation. The poller may
+                    // already have noticed the create between `engine.upload`
+                    // returning and this `mark` call (a few µs at most); for
+                    // that microscopic window the sync_item's UNIQUE
+                    // constraint on (mapping_id, relative_path) blocks a
+                    // duplicate insert. The mark guarantees subsequent ticks
+                    // skip the echo cleanly.
+                    let _guard = in_flight.mark(&rf.id);
                     items::set_remote_id(db.connection(), item.id, &rf.id).await?;
+                    items::update_fingerprint(
+                        db.connection(),
+                        item.id,
+                        Some(size),
+                        Some(&md5),
+                        unix_now(),
+                    )
+                    .await?;
                 }
             }
-            items::update_fingerprint(db.connection(), item.id, Some(size), Some(&md5), unix_now())
-                .await?;
         }
 
         Operation::Download => {
@@ -200,6 +242,10 @@ async fn execute(
 
         Operation::DeleteRemote => {
             if let Some(rid) = &item.remote_id {
+                // Mark in-flight so the poller's `removed` event doesn't
+                // re-enqueue a `DeleteLocal` for the file we're already
+                // deleting end-to-end.
+                let _guard = in_flight.mark(rid);
                 engine.delete_remote(rid).await?;
             }
             items::delete(db.connection(), item.id).await?;
@@ -231,6 +277,10 @@ async fn execute(
             };
             let (parent_rel, new_name) = split_parent(new_rel);
             let new_parent_id = ensure_remote_folder(http, remote_root_id, parent_rel).await?;
+            // Mark in-flight: Drive emits a change event for the renamed file,
+            // and even though our md5 echo check would handle it, suppressing
+            // the round-trip saves the poller a redundant `apply_remote` walk.
+            let _guard = in_flight.mark(rid);
             engine.move_remote(rid, &new_parent_id, new_name).await?;
             items::set_relative_path(db.connection(), item.id, new_rel).await?;
         }

@@ -15,6 +15,7 @@ use std::path::Path;
 
 use serde_json::json;
 
+use crate::daemon::in_flight::InFlightOps;
 use crate::drive::changes::RemoteChange;
 use crate::error::{Error, Result};
 use crate::state::Db;
@@ -140,13 +141,23 @@ pub async fn apply_local(
 }
 
 /// Convert a `RemoteChange` into `pending_operation` rows. Filters native
-/// Google Docs (FR-011) and our own echoes (md5 match).
+/// Google Docs (FR-011), our own in-flight ops ([`InFlightOps`]), and
+/// post-echo md5 matches.
 pub async fn apply_remote(
     change: RemoteChange,
     db: &Db,
     mapping_id: MappingId,
     _local_root: &Path,
+    in_flight: &InFlightOps,
 ) -> Result<()> {
+    // First gate: is this an echo of a write the dispatcher is performing
+    // right now? Eliminates the race between `engine.update` returning and
+    // the dispatcher persisting the new fingerprint to `sync_item`.
+    if in_flight.contains(&change.file_id) {
+        tracing::debug!(file_id = %change.file_id, "skipping in-flight echo");
+        return Ok(());
+    }
+
     if change.removed {
         if let Some(item) = items::get_by_remote_id(db.connection(), &change.file_id).await? {
             ops::enqueue(

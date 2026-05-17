@@ -6,6 +6,7 @@
 //! token, the loops drain whatever's in flight, and the function returns
 //! cleanly. Tests use this to validate the continuous-sync user story (T041–T049).
 
+pub mod in_flight;
 pub mod lock;
 pub mod runtime;
 
@@ -18,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::in_flight::InFlightOps;
 use crate::drive::changes::{self, RemoteChange};
 use crate::drive::http::DriveHttp;
 use crate::engine::SyncEngine;
@@ -56,6 +58,12 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     // Notifier the reconciler signals on every enqueue so the dispatcher
     // wakes immediately instead of waiting POLL_INTERVAL.
     let wake = Arc::new(Notify::new());
+
+    // Shared "operations in progress" registry. The dispatcher marks a
+    // Drive file id in-flight around every engine.upload/update call; the
+    // remote-side reconciler short-circuits change events for ids in the
+    // registry so we never enqueue a Download for the echo of our own write.
+    let in_flight = InFlightOps::new();
 
     let (raw_tx, raw_rx) = mpsc::channel::<WatchEvent>(1024);
     let (debounced_tx, mut debounced_rx) = mpsc::channel::<WatchEvent>(1024);
@@ -122,6 +130,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         let mapping_id = ctx.mapping_id;
         let wake_remote = wake.clone();
         let cancel_remote = cancel.clone();
+        let in_flight_remote = in_flight.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -129,7 +138,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                     _ = cancel_remote.cancelled() => return,
                     maybe = remote_rx.recv() => {
                         let Some(change) = maybe else { return; };
-                        if let Err(e) = continuous::apply_remote(change, &db, mapping_id, &local_root).await {
+                        if let Err(e) = continuous::apply_remote(change, &db, mapping_id, &local_root, &in_flight_remote).await {
                             tracing::warn!(error = %e, "apply_remote failed");
                         } else {
                             wake_remote.notify_one();
@@ -149,6 +158,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         let remote_root_id = ctx.remote_root_id.clone();
         let wake_dispatch = wake.clone();
         let cancel_dispatch = cancel.clone();
+        let in_flight_dispatch = in_flight.clone();
         tokio::spawn(async move {
             if let Err(e) = runtime::run(
                 db,
@@ -158,6 +168,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                 remote_root_id,
                 wake_dispatch,
                 cancel_dispatch,
+                in_flight_dispatch,
             )
             .await
             {
