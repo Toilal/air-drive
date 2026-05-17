@@ -1,0 +1,7 @@
+edition = "2024"
+max_width = 100
+
+# The following options are nightly-only and produce warnings on stable rustfmt:
+#   imports_granularity = "Crate"
+#   group_imports       = "StdExternalCrate"
+# Enable them by switching to nightly rustfmt if you want crate-level import grouping.

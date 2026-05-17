@@ -34,14 +34,14 @@ hermetic integration tests, `tests/e2e/` for CI-gated real-Drive smoke (optional
 
 **Purpose**: project skeleton, toolchain config, CI scaffolding.
 
-- [ ] T001 Initialize the Cargo crate at the repo root (`cargo init --name air-drive --bin`), with edition 2024 and `rust-version` set to current stable in `Cargo.toml`
-- [ ] T002 [P] Declare all production dependencies in `Cargo.toml`: `tokio` (multi-thread + macros + signal + sync + fs + io-util + process + net), `notify` ^6, `reqwest` ^0.12 (with `rustls-tls` + `json`), `serde` + `serde_json` (with `derive`), `serde_with`, `yup-oauth2` ^11, `rusqlite` ^0.31 (with `bundled`), `clap` ^4 (with `derive`), `thiserror`, `tracing`, `tracing-subscriber` (with `fmt` + `env-filter`), `fd-lock`, `toml`, `directories` for XDG paths
-- [ ] T003 [P] Declare dev-dependencies in `Cargo.toml`: `wiremock`, `tempfile`, `assert_cmd`, `predicates`, `serde_json` (already present)
-- [ ] T004 [P] Add crate-level attrs to `src/main.rs`: `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]` (warn for tests), and clippy lints `clippy::unwrap_used = "warn"`, `clippy::expect_used = "warn"`, `clippy::panic = "warn"`, only in non-test code
-- [ ] T005 [P] Add `rustfmt.toml` at the repo root with `edition = "2024"`, `max_width = 100`, `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`
-- [ ] T006 [P] Add `clippy.toml` at the repo root setting `allow-unwrap-in-tests = true`, `allow-expect-in-tests = true`, `allow-panic-in-tests = true`
-- [ ] T007 [P] Create GitHub Actions workflow `.github/workflows/ci.yml` running on push + pull_request to `main` and feature branches: jobs `fmt` (`cargo fmt --all -- --check`), `clippy` (`cargo clippy --all-targets --all-features -- -D warnings`), `test` (`cargo test --workspace`); cache `~/.cargo` and `target/` with `Swatinem/rust-cache`
-- [ ] T008 [P] Create the module skeleton: empty `src/cli/mod.rs`, `src/daemon/mod.rs`, `src/engine/mod.rs`, `src/drive/mod.rs`, `src/watch/mod.rs`, `src/reconcile/mod.rs`, `src/state/mod.rs`, `src/config/mod.rs`, `src/error.rs`. Wire them as `pub mod` declarations in `src/main.rs`
+- [X] T001 Initialize the Cargo crate at the repo root (`cargo init --name air-drive --bin`), with edition 2024 and `rust-version` set to current stable in `Cargo.toml`
+- [X] T002 [P] Declare all production dependencies in `Cargo.toml`: `tokio` (multi-thread + macros + signal + sync + fs + io-util + process + net), `notify` ^6, `reqwest` ^0.12 (with `rustls-tls` + `json`), `serde` + `serde_json` (with `derive`), `serde_with`, `yup-oauth2` ^11, `rusqlite` ^0.31 (with `bundled`), `clap` ^4 (with `derive`), `thiserror`, `tracing`, `tracing-subscriber` (with `fmt` + `env-filter`), `fd-lock`, `toml`, `directories` for XDG paths
+- [X] T003 [P] Declare dev-dependencies in `Cargo.toml`: `wiremock`, `tempfile`, `assert_cmd`, `predicates`, `serde_json` (already present)
+- [X] T004 [P] Add crate-level attrs to `src/main.rs`: `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]` (warn for tests), and clippy lints `clippy::unwrap_used = "warn"`, `clippy::expect_used = "warn"`, `clippy::panic = "warn"`, only in non-test code
+- [X] T005 [P] Add `rustfmt.toml` at the repo root with `edition = "2024"`, `max_width = 100`, `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`
+- [X] T006 [P] Add `clippy.toml` at the repo root setting `allow-unwrap-in-tests = true`, `allow-expect-in-tests = true`, `allow-panic-in-tests = true`
+- [X] T007 [P] Create GitHub Actions workflow `.github/workflows/ci.yml` running on push + pull_request to `main` and feature branches: jobs `fmt` (`cargo fmt --all -- --check`), `clippy` (`cargo clippy --all-targets --all-features -- -D warnings`), `test` (`cargo test --workspace`); cache `~/.cargo` and `target/` with `Swatinem/rust-cache`
+- [X] T008 [P] Create the module skeleton: empty `src/cli/mod.rs`, `src/daemon/mod.rs`, `src/engine/mod.rs`, `src/drive/mod.rs`, `src/watch/mod.rs`, `src/reconcile/mod.rs`, `src/state/mod.rs`, `src/config/mod.rs`, `src/error.rs`. Wire them as `pub mod` declarations in `src/main.rs`
 
 **Checkpoint**: `cargo build` succeeds, `cargo fmt --check` clean, CI green on an empty branch.
 

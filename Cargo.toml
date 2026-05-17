@@ -1,0 +1,73 @@
+[package]
+name = "air-drive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Open source Google Drive sync client for Linux, event-driven on both sides."
+repository = "https://github.com/Toilal/air-drive"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "sync",
+    "fs",
+    "io-util",
+    "process",
+    "net",
+    "time",
+] }
+
+# Local filesystem watcher
+notify = "6"
+
+# HTTP + JSON
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+
+# Google OAuth (PKCE flow for desktop apps)
+yup-oauth2 = "11"
+
+# Embedded SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Errors and tracing
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Process-level file lock for single-instance enforcement
+fd-lock = "4"
+
+# TOML config
+toml = "0.8"
+
+# XDG path resolution
+directories = "5"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
