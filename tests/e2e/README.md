@@ -33,6 +33,44 @@ credentials is safe.
 
 ## One-time setup
 
+### Automated path (recommended)
+
+After completing the manual GCP steps below (you'll have a `client_id` in hand),
+a single command handles everything else — the OAuth dance, parent-folder
+creation, and pushing the three secrets to GitHub:
+
+```sh
+cargo run --example setup_e2e -- \
+    --client-id <YOUR_OAUTH_DESKTOP_CLIENT_ID> \
+    --config-dir /tmp/air-drive-e2e-setup
+```
+
+What the script does:
+
+1. Checks `gh auth status` (you need to be `gh auth login`-ed).
+2. Drives the OAuth dance — your default browser opens, you sign in as the test
+   account, approve. `tokens.json` is written to the `--config-dir` at `0600`.
+3. Looks for an existing `air-drive-e2e-parent` folder under My Drive; reuses
+   it if found, otherwise creates one. Idempotent across re-runs.
+4. Pushes `AIR_DRIVE_E2E_TOKENS`, `AIR_DRIVE_E2E_CLIENT_ID`, and
+   `AIR_DRIVE_E2E_PARENT_FOLDER_ID` to the current repository's Actions
+   secrets via `gh secret set`. Pass `--repo owner/name` to target a different
+   repo.
+
+Pass `--dry-run` to see the resolved values without pushing. Pass
+`--force-new-token` if the cached refresh token expired and you need to
+re-approve.
+
+What it can't do (do it once in the Cloud Console):
+
+- Create the GCP project.
+- Enable the Drive API.
+- Create the OAuth **Desktop** client (`gcloud` has no command for that
+  specific client type — only IAP/web clients are scriptable).
+
+The remainder of this section is the manual click-by-click for the four
+prerequisite GCP steps.
+
 ### 1. Dedicated Google account
 
 Don't use your personal account. Create something like
@@ -60,41 +98,30 @@ Sign in to Drive as the test account. Create a folder named
 (`https://drive.google.com/drive/folders/<ID>`). That's
 `AIR_DRIVE_E2E_PARENT_FOLDER_ID`.
 
-### 4. Acquire the refresh token
+### 4. Acquire the token + create the parent folder + push the secrets
 
-The `air-drive link` subcommand drives the OAuth dance and persists a
-`tokens.json` locally. Run it once:
-
-```sh
-mkdir -p /tmp/e2e-setup
-cat > /tmp/e2e-setup/config.toml <<EOF
-[oauth]
-client_id = "<your AIR_DRIVE_E2E_CLIENT_ID>"
-EOF
-
-cargo run --release -- --config-dir /tmp/e2e-setup link
-```
-
-The CLI opens a browser tab against Google's consent page. Approve as the test
-account. On success, `tokens.json` is written to `/tmp/e2e-setup/tokens.json`
-with mode `0600`.
-
-The contents of that file is the `AIR_DRIVE_E2E_TOKENS` value:
+Use the automated path from the top of this section:
 
 ```sh
-cat /tmp/e2e-setup/tokens.json
+cargo run --example setup_e2e -- \
+    --client-id <YOUR_AIR_DRIVE_E2E_CLIENT_ID> \
+    --config-dir /tmp/air-drive-e2e-setup
 ```
 
-### 5. Store the secrets
+If you'd rather do it by hand (e.g. for a forked CI account you don't have
+`gh` access to), the legacy manual flow still works:
 
-In the repo settings:
-
-- `Settings → Secrets and variables → Actions → New repository secret`
-- Add `AIR_DRIVE_E2E_TOKENS`, `AIR_DRIVE_E2E_CLIENT_ID`,
-  `AIR_DRIVE_E2E_PARENT_FOLDER_ID` with their values.
+1. Run `air-drive link --config-dir /tmp/e2e-setup` to drive the OAuth dance.
+2. Capture `cat /tmp/e2e-setup/tokens.json` as the `AIR_DRIVE_E2E_TOKENS` value.
+3. Create the parent folder manually in the Drive web UI, copy its ID.
+4. In repo settings, `Settings → Secrets and variables → Actions → New
+   repository secret`, add the three secrets:
+   - `AIR_DRIVE_E2E_TOKENS`
+   - `AIR_DRIVE_E2E_CLIENT_ID`
+   - `AIR_DRIVE_E2E_PARENT_FOLDER_ID`
 
 The `.github/workflows/e2e.yml` workflow picks them up from
-`secrets.AIR_DRIVE_E2E_*`.
+`secrets.AIR_DRIVE_E2E_*` regardless of how they got there.
 
 ## Running locally
 
