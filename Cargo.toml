@@ -87,6 +87,9 @@ hex = "0.4"
 # and the e2e setup script. Cross-platform shim around xdg-open / start / open.
 webbrowser = "1"
 
+# Glob matching for the user-configurable watch.ignore_patterns list.
+globset = "0.4"
+
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"

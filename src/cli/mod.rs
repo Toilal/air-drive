@@ -5,6 +5,7 @@
 //! is dispatched via [`dispatch`]; the actual subcommand handlers live in sibling
 //! modules ([`link`], [`map`], [`start`], [`unlink`], [`setup`]).
 
+pub mod init;
 pub mod link;
 pub mod map;
 pub mod pause;
@@ -103,6 +104,17 @@ pub enum Command {
         #[arg(long)]
         install_service: bool,
     },
+    /// Bootstrap a personal Google Cloud OAuth client (Desktop) via the GCP
+    /// Console, then write `[oauth]` into `config.toml`. Required when the
+    /// embedded client_id is unusable (e.g. invalid_client errors).
+    Init {
+        /// Overwrite an existing `[oauth].client_id` in config.toml.
+        #[arg(long)]
+        force: bool,
+        /// Run `air-drive link` immediately after writing the config.
+        #[arg(long)]
+        link: bool,
+    },
 }
 
 /// Exit codes documented in `contracts/cli.md`.
@@ -167,6 +179,7 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Setup { install_service } => {
             setup::run(cli.config_dir.as_deref(), install_service).await
         }
+        Command::Init { force, link } => init::run(cli.config_dir.as_deref(), force, link).await,
     }
 }
 

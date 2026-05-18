@@ -31,6 +31,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     /// `[rclone]` — explicit `rclone` binary override.
     pub rclone: RcloneConfig,
+    /// `[watch]` — local filesystem watcher tuning.
+    pub watch: WatchConfig,
 }
 
 /// Optional OAuth client override (Q1 clarification — hybrid model).
@@ -79,6 +81,65 @@ impl Default for DaemonConfig {
             log_file: String::new(),
         }
     }
+}
+
+/// Local filesystem watcher tuning. Currently only carries the
+/// `ignore_patterns` list — glob patterns matched against the **file name**
+/// (not the full path). Files whose name matches any pattern are never synced
+/// (no upload, no rename propagation, no delete propagation).
+///
+/// Defaults cover the well-known editor/OS scratch files: vim swap, emacs
+/// auto-save + backup + lock, gedit, LibreOffice locks, MS Office owner
+/// files, JetBrains atomic-rename temps, and macOS/Windows OS metadata. Users
+/// can override the whole list in `config.toml` to add their own patterns.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WatchConfig {
+    /// Glob patterns matched against the file name. Default list seeded by
+    /// [`WatchConfig::default`].
+    pub ignore_patterns: Vec<String>,
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            ignore_patterns: default_ignore_patterns()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    }
+}
+
+/// Source-of-truth list of file-name globs the watcher ignores by default.
+/// Kept as a `&[&str]` so it can be referenced from docs, init, and tests.
+pub fn default_ignore_patterns() -> &'static [&'static str] {
+    &[
+        // vim: swap files + atomic-save sentinel.
+        ".*.swp",
+        ".*.swo",
+        ".*.swx",
+        ".*.swn",
+        "4913",
+        // emacs: auto-save, backup, lockfile.
+        "#*#",
+        "*~",
+        ".#*",
+        // gedit / nautilus.
+        ".goutputstream-*",
+        // LibreOffice owner-lock.
+        ".~lock.*#",
+        // MS Office owner-file.
+        "~$*",
+        // JetBrains atomic-rename temps.
+        "*.___jb_tmp___",
+        "*.___jb_old___",
+        // OS metadata.
+        ".DS_Store",
+        "._*",
+        "Thumbs.db",
+        "desktop.ini",
+    ]
 }
 
 /// Explicit `rclone` binary override (cf. `research.md §5`, step 1).
@@ -153,6 +214,39 @@ mod tests {
         assert_eq!(loaded.daemon.remote_poll_interval_seconds, 45);
         assert_eq!(loaded.daemon.log_file, "/tmp/air-drive.log");
         assert_eq!(loaded.rclone.path.as_deref(), Some("/usr/local/bin/rclone"));
+    }
+
+    #[test]
+    fn default_watch_block_has_seeded_patterns() {
+        let cfg = Config::default();
+        // Both the in-memory default list and the canonical defaults helper
+        // must agree — the test catches accidental drift if one is edited.
+        let expected: Vec<&str> = default_ignore_patterns().to_vec();
+        let got: Vec<&str> = cfg
+            .watch
+            .ignore_patterns
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn save_default_writes_watch_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        Config::default().save(&path).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[watch]"), "config.toml lacks [watch]: {body}");
+        assert!(
+            body.contains("ignore_patterns"),
+            "config.toml lacks ignore_patterns: {body}"
+        );
+        // Spot-check that a representative default made it in.
+        assert!(
+            body.contains(".DS_Store"),
+            "config.toml missing .DS_Store default: {body}"
+        );
     }
 
     #[test]

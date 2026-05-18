@@ -50,6 +50,8 @@ pub struct DaemonContext {
     pub remote_poll_interval: Duration,
     /// XDG runtime dir — where the control socket (`control.sock`) lives.
     pub runtime_dir: PathBuf,
+    /// File-name glob patterns the watcher ignores (from `[watch].ignore_patterns`).
+    pub watch_ignore_patterns: Vec<String>,
 }
 
 /// Run the daemon's continuous sync loop until `cancel` fires (SIGTERM/SIGINT or
@@ -78,7 +80,9 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     let (remote_tx, mut remote_rx) = mpsc::channel::<RemoteChange>(1024);
 
     // 1. Local watcher (notify) → raw events channel.
-    let (_watcher_keepalive, watcher_rx) = watch::Watcher::start(&ctx.local_root)?;
+    let ignore_matcher = Arc::new(watch::build_ignore_matcher(&ctx.watch_ignore_patterns)?);
+    let (_watcher_keepalive, watcher_rx) =
+        watch::Watcher::start(&ctx.local_root, ignore_matcher)?;
     let raw_forwarder = forward_channel(watcher_rx, raw_tx, cancel.clone());
 
     // 2. Debounce.
