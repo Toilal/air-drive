@@ -126,6 +126,7 @@ pub async fn run(
         local_root,
         remote_root_id: mapping_row.remote_folder_id.clone(),
         remote_poll_interval: Duration::from_secs(poll_interval),
+        runtime_dir: paths.runtime().to_path_buf(),
     };
 
     let cancel = CancellationToken::new();

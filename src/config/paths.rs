@@ -45,17 +45,27 @@ impl Paths {
             Error::Config("could not resolve XDG project directories (no $HOME?)".into())
         })?;
 
-        let config = match config_override {
-            Some(p) => p.to_path_buf(),
-            None => dirs.config_dir().to_path_buf(),
+        // When the user explicitly overrides the config dir, force the runtime
+        // and cache dirs to live under it too. This keeps test runs (which
+        // pass distinct tempdirs via `--config-dir`) isolated — without it,
+        // parallel test daemons would all bind the same control socket under
+        // `$XDG_RUNTIME_DIR/air-drive/`.
+        let (config, cache, runtime) = match config_override {
+            Some(p) => {
+                let p = p.to_path_buf();
+                let cache = p.join("cache");
+                let runtime = p.join("runtime");
+                (p, cache, runtime)
+            }
+            None => {
+                let cache = dirs.cache_dir().to_path_buf();
+                let runtime = dirs
+                    .runtime_dir()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| dirs.config_dir().join("runtime"));
+                (dirs.config_dir().to_path_buf(), cache, runtime)
+            }
         };
-
-        let cache = dirs.cache_dir().to_path_buf();
-
-        let runtime = dirs
-            .runtime_dir()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| config.join("runtime"));
 
         Ok(Self {
             config,
@@ -114,12 +124,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn override_redirects_only_config_dir() {
+    fn override_co_locates_cache_and_runtime_under_config() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths::discover(Some(tmp.path())).unwrap();
         assert_eq!(paths.config(), tmp.path());
-        assert_ne!(paths.cache(), tmp.path());
-        assert_ne!(paths.runtime(), tmp.path());
+        // When the caller explicitly forces a config dir, the cache + runtime
+        // co-locate beneath it (test isolation, scoped test fixtures, etc.).
+        assert!(paths.cache().starts_with(tmp.path()));
+        assert!(paths.runtime().starts_with(tmp.path()));
     }
 
     #[test]

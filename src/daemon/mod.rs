@@ -8,6 +8,7 @@
 
 pub mod in_flight;
 pub mod lock;
+pub mod pause;
 pub mod runtime;
 
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::daemon::in_flight::InFlightOps;
+use crate::daemon::pause::{PauseState, run_control_server};
 use crate::drive::changes::{self, RemoteChange};
 use crate::drive::http::DriveHttp;
 use crate::engine::SyncEngine;
@@ -46,6 +48,8 @@ pub struct DaemonContext {
     pub remote_root_id: String,
     /// Poll interval for `changes.list`, clamped to `[10, 60]` upstream.
     pub remote_poll_interval: Duration,
+    /// XDG runtime dir — where the control socket (`control.sock`) lives.
+    pub runtime_dir: PathBuf,
 }
 
 /// Run the daemon's continuous sync loop until `cancel` fires (SIGTERM/SIGINT or
@@ -64,6 +68,10 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     // remote-side reconciler short-circuits change events for ids in the
     // registry so we never enqueue a Download for the echo of our own write.
     let in_flight = InFlightOps::new();
+
+    // Shared pause flag, manipulated by the control-socket server, read by
+    // the dispatcher loop (which sleeps cooperatively on it).
+    let pause_state = PauseState::new();
 
     let (raw_tx, raw_rx) = mpsc::channel::<WatchEvent>(1024);
     let (debounced_tx, mut debounced_rx) = mpsc::channel::<WatchEvent>(1024);
@@ -159,6 +167,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         let wake_dispatch = wake.clone();
         let cancel_dispatch = cancel.clone();
         let in_flight_dispatch = in_flight.clone();
+        let pause_dispatch = pause_state.clone();
         tokio::spawn(async move {
             if let Err(e) = runtime::run(
                 db,
@@ -169,10 +178,23 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                 wake_dispatch,
                 cancel_dispatch,
                 in_flight_dispatch,
+                pause_dispatch,
             )
             .await
             {
                 tracing::error!(error = %e, "dispatcher exited with error");
+            }
+        })
+    };
+
+    // 6b. Control-socket server (pause / resume / status-snapshot).
+    let control_task = {
+        let cancel_ctl = cancel.clone();
+        let state = pause_state.clone();
+        let runtime_dir = ctx.runtime_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_control_server(runtime_dir, state, cancel_ctl).await {
+                tracing::error!(error = %e, "control socket server exited with error");
             }
         })
     };
@@ -196,6 +218,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     let _ = poller_task.await;
     let _ = reconcile_remote_task.await;
     let _ = dispatcher_task.await;
+    let _ = control_task.await;
     Ok(())
 }
 

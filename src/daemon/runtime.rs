@@ -21,6 +21,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::daemon::in_flight::InFlightOps;
+use crate::daemon::pause::PauseState;
 use crate::drive::http::DriveHttp;
 use crate::engine::SyncEngine;
 use crate::error::{Error, Result};
@@ -46,7 +47,7 @@ const MAX_BACKOFF_SECS: i64 = 60;
 ///
 /// `wake` is signalled by the reconciler whenever it enqueues a new op so the
 /// dispatcher doesn't wait the full `POLL_INTERVAL` to react.
-#[allow(clippy::too_many_arguments)] // wiring 8 collaborators by name is clearer than a struct
+#[allow(clippy::too_many_arguments)] // wiring 9 collaborators by name is clearer than a struct
 pub async fn run(
     db: Db,
     engine: Arc<dyn SyncEngine>,
@@ -56,8 +57,18 @@ pub async fn run(
     wake: Arc<Notify>,
     cancel: CancellationToken,
     in_flight: InFlightOps,
+    pause: PauseState,
 ) -> Result<()> {
     loop {
+        // Block cooperatively while paused. `wait_for_resume` returns instantly
+        // when running, so the running-path overhead is one atomic read.
+        if pause.is_paused() {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Ok(()),
+                _ = pause.wait_for_resume() => {}
+            }
+        }
         // Drain everything that's due before sleeping.
         loop {
             let Some(op) = ops::next_due(db.connection(), unix_now()).await? else {

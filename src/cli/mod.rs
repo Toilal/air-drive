@@ -7,6 +7,8 @@
 
 pub mod link;
 pub mod map;
+pub mod pause;
+pub mod resume;
 pub mod runtime;
 pub mod setup;
 pub mod start;
@@ -158,14 +160,8 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
             )
             .await
         }
-        Command::Pause | Command::Resume => {
-            // Phase 4 wires the control socket. Until then, every pause/resume call
-            // hits "no daemon running" — matching the documented behaviour for the
-            // missing-socket case.
-            Err(Error::Config(
-                "control socket not yet implemented — pause/resume land in Phase 4".into(),
-            ))
-        }
+        Command::Pause => pause::run(cli.config_dir.as_deref()).await,
+        Command::Resume => resume::run(cli.config_dir.as_deref()).await,
         Command::Status { json } => status::run(cli.config_dir.as_deref(), json).await,
         Command::Unlink { yes } => unlink::run(cli.config_dir.as_deref(), yes).await,
         Command::Setup { install_service } => {
