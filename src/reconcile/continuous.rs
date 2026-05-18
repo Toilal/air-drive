@@ -89,6 +89,9 @@ pub async fn apply_local(
 
         WatchEvent::Deleted(p) => {
             let rel = strip_root(&p, local_root)?;
+            // Conflict cleanup (T054b): if the deleted path is one side of an
+            // open conflict_record, the user just resolved it — drop the row.
+            crate::reconcile::conflict::cleanup_on_local_delete(db, &rel).await?;
             if let Some(item) =
                 items::get_by_relative_path(db.connection(), mapping_id, &rel).await?
             {
@@ -147,7 +150,7 @@ pub async fn apply_remote(
     change: RemoteChange,
     db: &Db,
     mapping_id: MappingId,
-    _local_root: &Path,
+    local_root: &Path,
     in_flight: &InFlightOps,
 ) -> Result<()> {
     // First gate: is this an echo of a write the dispatcher is performing
@@ -201,6 +204,36 @@ pub async fn apply_remote(
             // own upload — nothing to do.
             if item.md5.as_deref() == Some(remote_md5.as_str()) && item.size == Some(remote_size) {
                 return Ok(());
+            }
+            // Conflict detection (T054): if the local file's CURRENT md5
+            // differs from the last-synced fingerprint, both sides drifted
+            // independently. Open a conflict — rename the local copy, insert
+            // a conflict_record, then proceed with the Download so the remote
+            // version takes the canonical name (Q2: remote keeps canonical).
+            let canonical_local = local_root.join(&item.relative_path);
+            if canonical_local.is_file()
+                && let Some(last_synced_md5) = item.md5.as_deref()
+            {
+                match crate::reconcile::fingerprint::compute_local(&canonical_local).await {
+                    Ok((_, local_md5)) if local_md5 != last_synced_md5 => {
+                        // Both sides changed since the last sync → conflict.
+                        crate::reconcile::conflict::open_conflict(
+                            db,
+                            item.id,
+                            &canonical_local,
+                            &item.relative_path,
+                            local_root,
+                            unix_now(),
+                        )
+                        .await?;
+                    }
+                    Ok(_) => { /* local untouched — pure remote update */ }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        path = %canonical_local.display(),
+                        "could not fingerprint local for conflict check; treating as remote-only update"
+                    ),
+                }
             }
             // Real divergence — enqueue a Download to pull the new content.
             let payload = json!({
