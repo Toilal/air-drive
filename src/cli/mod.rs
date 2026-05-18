@@ -10,6 +10,7 @@ pub mod map;
 pub mod runtime;
 pub mod setup;
 pub mod start;
+pub mod status;
 pub mod unlink;
 
 use std::path::PathBuf;
@@ -165,12 +166,7 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
                 "control socket not yet implemented — pause/resume land in Phase 4".into(),
             ))
         }
-        Command::Status { json: _ } => {
-            // Status output is implemented at the end of Phase 3 (T038/T039 follow-up).
-            Err(Error::Config(
-                "`status` is not yet implemented in this MVP".into(),
-            ))
-        }
+        Command::Status { json } => status::run(cli.config_dir.as_deref(), json).await,
         Command::Unlink { yes } => unlink::run(cli.config_dir.as_deref(), yes).await,
         Command::Setup { install_service } => {
             setup::run(cli.config_dir.as_deref(), install_service).await

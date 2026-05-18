@@ -976,6 +976,12 @@ impl DaemonProcess {
         self.child.try_wait().ok().flatten()
     }
 
+    /// OS-level process id of the spawned daemon. Used by tests that assert
+    /// the lock-contention error message names the running PID (T064).
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
     /// Send `SIGTERM` and wait up to 10 s for the daemon to drain. Falls back to
     /// `SIGKILL` if the daemon doesn't exit in time. Returns the final exit status.
     pub async fn shutdown(mut self) -> std::process::ExitStatus {

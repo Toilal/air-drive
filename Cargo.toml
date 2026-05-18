@@ -101,6 +101,9 @@ hex = "0.4"
 # Auto-load `<repo>/.env` for local e2e runs so developers don't need to
 # `set -a; source .env; set +a` every shell. CI passes env vars directly.
 dotenvy = "0.15"
+# Validate the `status --json` output against `contracts/status.schema.json`
+# (Phase 5 / FR-008).
+jsonschema = "0.28"
 
 # Integration tests live under tests/integration/ rather than at the default
 # tests/ root so the layout mirrors the spec (specs/001-minimal-sync-daemon/tasks.md).
@@ -112,6 +115,14 @@ path = "tests/integration/initial_sync.rs"
 [[test]]
 name = "continuous_sync"
 path = "tests/integration/continuous_sync.rs"
+
+[[test]]
+name = "status"
+path = "tests/integration/status.rs"
+
+[[test]]
+name = "multi_instance"
+path = "tests/integration/multi_instance.rs"
 
 # End-to-end suite that hits the real Google Drive API + the real rclone binary.
 # Every test is `#[ignore]`d so the default `cargo test` skips them; CI runs them

@@ -67,6 +67,7 @@
           "type": "string",
           "enum": ["transient", "auth", "quota", "io", "remote", "mapping", "config", "internal"],
           "description": "auth = OAuth refresh hard-fail (FR-009); remote = watched remote folder gone (FR-020); mapping = watched local path missing (FR-023); transient = retry-eligible (FR-012); quota = API rate limit reached; io = local filesystem error (FR-021); config = invalid configuration (e.g. bad OAuth client_id override); internal = unexpected daemon-side error."
+        }
       }
     },
     "conflicts": {
