@@ -6,9 +6,11 @@
 //!   `AIR_DRIVE_TEST_BEARER_TOKEN`. The factory short-circuits the OAuth dance whenever
 //!   that env var is non-empty.
 //! - [`YupOAuthProvider`] — wraps a [`yup_oauth2`] `InstalledFlowAuthenticator` configured
-//!   with `HTTPRedirect` and the Drive scopes. PKCE is enabled by leaving the
-//!   `client_secret` empty (yup-oauth2 emits the code_challenge/verifier pair
-//!   automatically for installed flows when no secret is set).
+//!   with `HTTPRedirect` and the Drive scopes. Google's Desktop OAuth requires both
+//!   a `client_id` and a `client_secret` at the token endpoint, distributed together
+//!   with the app — the "secret" is a public identifier in this flow (cf. rclone,
+//!   gcloud, Insync), the real auth proof is PKCE. Both are passed via
+//!   `Config.oauth.client_id` + `Config.oauth.client_secret`.
 //!
 //! Token storage lives at `<config_dir>/tokens.json`. The file MUST be `0600` — the
 //! factory refuses to start otherwise (FR-016 in `spec.md`).
@@ -117,6 +119,7 @@ pub async fn build_provider(
 
     let secret = build_application_secret(oauth);
     let auth = InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
+        .flow_delegate(Box::new(BrowserOpeningDelegate))
         .persist_tokens_to_disk(&tokens_path)
         .build()
         .await
@@ -143,6 +146,40 @@ pub async fn build_provider(
     Ok(Arc::new(YupOAuthProvider { fetcher }))
 }
 
+/// `InstalledFlowDelegate` that opens the OAuth consent URL in the user's default
+/// browser instead of just printing it to stdout. yup-oauth2's stock delegate
+/// (`DefaultInstalledFlowDelegate`) only emits the URL — useful for headless setups
+/// but a poor UX for the interactive `link` / setup-e2e flows.
+///
+/// On a headless host (`webbrowser::open` returns `Err`) we still print the URL so
+/// the user can copy/paste from the terminal.
+struct BrowserOpeningDelegate;
+
+impl yup_oauth2::authenticator_delegate::InstalledFlowDelegate for BrowserOpeningDelegate {
+    fn present_user_url<'a>(
+        &'a self,
+        url: &'a str,
+        _need_code: bool,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::result::Result<String, String>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            // Always print first so the user has a copy/paste fallback if the auto-open
+            // fails or sends them to the wrong browser profile.
+            eprintln!("[auth] open this URL in your test-account browser:\n  {url}");
+            match webbrowser::open(url) {
+                Ok(()) => {
+                    eprintln!("[auth] browser launched — complete the consent + grant flow there");
+                }
+                Err(e) => {
+                    eprintln!("[auth] could not auto-open browser ({e}); use the URL above");
+                }
+            }
+            Ok(String::new())
+        })
+    }
+}
+
 /// Build the [`ApplicationSecret`] from the daemon's [`OauthConfig`]. Endpoints can be
 /// overridden by `AIR_DRIVE_OAUTH_TOKEN_URL` / `AIR_DRIVE_OAUTH_AUTH_URL` so the mock
 /// in integration tests captures the dance (when a test ever drives the real flow —
@@ -152,9 +189,17 @@ fn build_application_secret(oauth: &OauthConfig) -> ApplicationSecret {
         .client_id
         .clone()
         .unwrap_or_else(|| EMBEDDED_CLIENT_ID.to_owned());
+    // Google's Desktop OAuth client REQUIRES a client_secret at the token endpoint
+    // even though PKCE handles the actual proof — Google's spec is stricter than
+    // the IETF Installed App profile. The "secret" is distributed with the app
+    // (cf. rclone, gcloud, Insync) and serves as a client identifier, not real
+    // confidentiality. When the user doesn't supply one we fall back to an empty
+    // string so the obviously-misconfigured case fails with Google's own
+    // "client_secret is missing" message rather than a silent local crash.
+    let client_secret = oauth.client_secret.clone().unwrap_or_default();
     ApplicationSecret {
         client_id,
-        client_secret: String::new(), // empty → PKCE flow
+        client_secret,
         auth_uri: std::env::var("AIR_DRIVE_OAUTH_AUTH_URL")
             .unwrap_or_else(|_| "https://accounts.google.com/o/oauth2/auth".into()),
         token_uri: std::env::var("AIR_DRIVE_OAUTH_TOKEN_URL")

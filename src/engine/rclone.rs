@@ -31,6 +31,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 use crate::drive::auth::TokenProvider;
+use crate::drive::http::DriveHttp;
 use crate::engine::staging;
 use crate::engine::{RemoteFile, SyncEngine};
 use crate::error::{Error, Result};
@@ -66,6 +67,13 @@ pub struct RcloneBinary {
 const REMOTE_NAME: &str = "airdrive";
 
 /// rclone-backed sync engine.
+///
+/// Hybrid: uploads + moves + deletes go through the resolved rclone binary
+/// (chunked uploads, retries, parallelism); downloads go through `DriveHttp`'s
+/// `GET files/{id}?alt=media` instead. Doing downloads via rclone would mean
+/// looking up the file's name + parent first because rclone addresses by path,
+/// not by id — and the simpler "stream from Drive REST" is already battle-
+/// tested by `HttpEngine`.
 #[derive(Clone)]
 pub struct RcloneEngine {
     binary: RcloneBinary,
@@ -73,6 +81,10 @@ pub struct RcloneEngine {
     client_id: Option<String>,
     /// Watched local root, used as the base for [`staging::stage_path`] on downloads.
     local_root: PathBuf,
+    /// Shared Drive REST client. Used for downloads (`alt=media`) — rclone has
+    /// no clean "fetch by file id" primitive without a follow-up `lsjson` to
+    /// resolve the path first.
+    http: DriveHttp,
 }
 
 impl std::fmt::Debug for RcloneEngine {
@@ -98,12 +110,14 @@ impl RcloneEngine {
         token_provider: Arc<dyn TokenProvider>,
         client_id: Option<String>,
         local_root: PathBuf,
+        http: DriveHttp,
     ) -> Self {
         Self {
             binary,
             token_provider,
             client_id,
             local_root,
+            http,
         }
     }
 
@@ -210,14 +224,22 @@ impl SyncEngine for RcloneEngine {
         };
         let staging_path = staging::stage_path(staging_root, &op_id)?;
 
-        let mut cmd = self.base_command().await?;
-        cmd.arg("copyto")
-            .arg(format!("{REMOTE_NAME}:{remote_id}"))
-            .arg(&staging_path);
-        if let Err(e) = self.run(cmd).await {
-            staging::discard(&staging_path)?;
-            return Err(e);
-        }
+        // Stream via DriveHttp — rclone's Drive backend addresses by path, not
+        // by id, and the path lookup would cost an extra `lsjson` round-trip.
+        // Same wire protocol as HttpEngine but reuses the rclone-side staging
+        // directory we already computed above.
+        let path = format!("files/{remote_id}");
+        let bytes = match self.http.get_bytes(&path, &[("alt", "media")]).await {
+            Ok(b) => b,
+            Err(e) => {
+                staging::discard(&staging_path)?;
+                return Err(e);
+            }
+        };
+        tokio::fs::write(&staging_path, &bytes).await.map_err(|e| {
+            let _ = staging::discard(&staging_path);
+            Error::Io(e)
+        })?;
         staging::promote(&staging_path, local)?;
         Ok(())
     }
@@ -296,11 +318,14 @@ mod tests {
 
     #[test]
     fn engine_exposes_resolved_binary() {
+        let token = Arc::new(StaticToken::new("tok"));
+        let http = DriveHttp::with_bases(token.clone(), "http://x", "http://x/upload").unwrap();
         let engine = RcloneEngine::new(
             dummy_binary(),
-            Arc::new(StaticToken::new("tok")),
+            token,
             None,
             PathBuf::from("/tmp/root"),
+            http,
         );
         assert_eq!(engine.binary().version, "1.65.0");
         assert_eq!(engine.binary().source, RcloneSource::Path);

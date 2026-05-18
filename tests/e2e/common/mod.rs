@@ -48,22 +48,40 @@ use air_drive::drive::metadata;
 pub struct E2eConfig {
     pub tokens_json: String,
     pub client_id: String,
+    pub client_secret: String,
     pub parent_folder_id: String,
 }
 
 impl E2eConfig {
-    /// Read the env-var trio. Returns `None` if any of them is missing or empty so
-    /// the caller can no-op gracefully.
+    /// Read the env-var quartet. Returns `None` if any of them is missing or empty
+    /// so the caller can no-op gracefully.
+    ///
+    /// Before reading, the function attempts to load `<cwd>/.env` via
+    /// [`dotenvy::dotenv`] so the local workflow is `setup_e2e` → file written
+    /// → `cargo test -- --ignored`, with no `set -a; source .env` step in
+    /// between. CI sets the env vars directly; `dotenv` returns `Err(NotFound)`
+    /// there and we silently fall back to `std::env::var`.
     pub fn from_env() -> Option<Self> {
+        // `dotenv()` only sets variables that aren't already in the env, so CI
+        // (which exports them via the workflow YAML) wins over any stray local
+        // `.env` someone forgot to delete.
+        let _ = dotenvy::dotenv();
+
         let tokens_json = std::env::var("AIR_DRIVE_E2E_TOKENS").ok()?;
         let client_id = std::env::var("AIR_DRIVE_E2E_CLIENT_ID").ok()?;
+        let client_secret = std::env::var("AIR_DRIVE_E2E_CLIENT_SECRET").ok()?;
         let parent_folder_id = std::env::var("AIR_DRIVE_E2E_PARENT_FOLDER_ID").ok()?;
-        if tokens_json.is_empty() || client_id.is_empty() || parent_folder_id.is_empty() {
+        if tokens_json.is_empty()
+            || client_id.is_empty()
+            || client_secret.is_empty()
+            || parent_folder_id.is_empty()
+        {
             return None;
         }
         Some(Self {
             tokens_json,
             client_id,
+            client_secret,
             parent_folder_id,
         })
     }
@@ -76,7 +94,7 @@ macro_rules! skip_unless_configured {
     ($cfg:ident) => {
         let Some($cfg) = $crate::common::E2eConfig::from_env() else {
             eprintln!(
-                "[e2e] AIR_DRIVE_E2E_TOKENS / _CLIENT_ID / _PARENT_FOLDER_ID not set — skipping. \
+                "[e2e] AIR_DRIVE_E2E_TOKENS / _CLIENT_ID / _CLIENT_SECRET / _PARENT_FOLDER_ID not set — skipping. \
                  See tests/e2e/README.md for setup."
             );
             return;
@@ -128,6 +146,7 @@ impl E2eFixture {
         // Build a real-Drive HTTP client from the tokens.
         let oauth = OauthConfig {
             client_id: Some(cfg.client_id.clone()),
+            client_secret: Some(cfg.client_secret.clone()),
         };
         let provider = build_provider(&oauth, &config_dir, None)
             .await
@@ -178,13 +197,15 @@ impl E2eFixture {
     }
 
     /// Build an [`assert_cmd`] command that runs the freshly-built `air-drive`
-    /// binary against the real Drive + real rclone. No test env-var overrides are
-    /// set — production code path only.
+    /// binary against the real Drive + real rclone. The only env override is the
+    /// `EXIT_AFTER_INITIAL_SYNC=1` knob — the e2e suite drives initial-sync via
+    /// `Command::output()` and would hang on the continuous loop otherwise.
     pub fn air_drive_cmd(&self) -> StdCommand {
         let mut cmd = StdCommand::cargo_bin("air-drive").expect("cargo-built binary");
         cmd.arg("--config-dir")
             .arg(&self.config_dir)
-            .env("RUST_LOG", "info");
+            .env("RUST_LOG", "info")
+            .env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "1");
         cmd
     }
 

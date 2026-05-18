@@ -56,6 +56,7 @@ jobs:
           # logged; the harness writes it to disk at 0600 inside a tempdir.
           AIR_DRIVE_E2E_TOKENS: ${{ secrets.AIR_DRIVE_E2E_TOKENS }}
           AIR_DRIVE_E2E_CLIENT_ID: ${{ secrets.AIR_DRIVE_E2E_CLIENT_ID }}
+          AIR_DRIVE_E2E_CLIENT_SECRET: ${{ secrets.AIR_DRIVE_E2E_CLIENT_SECRET }}
           AIR_DRIVE_E2E_PARENT_FOLDER_ID: ${{ secrets.AIR_DRIVE_E2E_PARENT_FOLDER_ID }}
         run: cargo test --test rclone_drive -- --ignored --nocapture
 

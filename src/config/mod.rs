@@ -40,6 +40,11 @@ pub struct OauthConfig {
     /// Override the project-owned `client_id` with the user's own Google Cloud client.
     /// `None` means "use the embedded default".
     pub client_id: Option<String>,
+    /// Companion `client_secret` for the Desktop OAuth client. Google's token
+    /// endpoint requires it even though the Desktop flow is otherwise PKCE-only —
+    /// the value is distributed with the app and not actually secret. Leave
+    /// `None` when `client_id` is also `None`; both come together.
+    pub client_secret: Option<String>,
 }
 
 /// Folder mapping display info. The authoritative `remote_folder_id` lives in `state.db`.
