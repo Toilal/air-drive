@@ -1,15 +1,19 @@
 # `tests/e2e/` — real Google Drive + real rclone
 
-This suite exists because the mocked integration tests (`tests/integration/`) bypass
-two non-trivial pieces of code:
+This suite exists because the mocked integration tests (`tests/integration/`)
+bypass two non-trivial pieces of code:
 
 - The `RcloneEngine` subprocess invocation against an actual `rclone` binary —
-  including the `RCLONE_CONFIG_AIRDRIVE_*` env-var handoff and the `lsjson` parse.
-- The OAuth refresh dance against Google's real token endpoint.
+  the `RCLONE_CONFIG_AIRDRIVE_*` env-var handoff, the `copyto` / `moveto`
+  / `delete` invocations, and the metadata-lookup-then-`copyto` dance the
+  download path uses (rclone Drive addresses by path, we have an id).
+- The OAuth refresh dance against Google's real token endpoint, including the
+  Desktop-OAuth quirk that Google requires a `client_secret` even though PKCE
+  handles the actual auth proof.
 
-These tests exercise the production code path with no overrides. They're
-`#[ignore]`d so they don't fire on every `cargo test`, and they self-skip when the
-required env vars are missing.
+These tests exercise the production code path with no test-only overrides.
+They're `#[ignore]`d so they don't fire on every `cargo test`, and they
+self-skip when the required env vars are missing.
 
 ## Scenarios
 
@@ -23,153 +27,186 @@ required env vars are missing.
 
 | Name | Content | GitHub Secret |
 |------|---------|---------------|
-| `AIR_DRIVE_E2E_TOKENS` | Contents of `tokens.json` (refresh token JSON). | `AIR_DRIVE_E2E_TOKENS` |
-| `AIR_DRIVE_E2E_CLIENT_ID` | GCP OAuth Desktop client id. | `AIR_DRIVE_E2E_CLIENT_ID` |
-| `AIR_DRIVE_E2E_PARENT_FOLDER_ID` | Drive folder ID under which tests create their per-run sub-folder. | `AIR_DRIVE_E2E_PARENT_FOLDER_ID` |
+| `AIR_DRIVE_E2E_TOKENS` | Contents of `tokens.json` (refresh token JSON written by yup-oauth2). | `AIR_DRIVE_E2E_TOKENS` |
+| `AIR_DRIVE_E2E_CLIENT_ID` | GCP OAuth Desktop client id (`xxx.apps.googleusercontent.com`). | `AIR_DRIVE_E2E_CLIENT_ID` |
+| `AIR_DRIVE_E2E_CLIENT_SECRET` | Companion `client_secret` for the Desktop client (`GOCSPX-...`). Google's token endpoint requires it even in PKCE; the value is distributed with the app and not actually confidential. | `AIR_DRIVE_E2E_CLIENT_SECRET` |
+| `AIR_DRIVE_E2E_PARENT_FOLDER_ID` | Drive folder ID under which each test creates a UUID-named scratch sub-folder. | `AIR_DRIVE_E2E_PARENT_FOLDER_ID` |
 
-If any of the three is unset or empty, every test prints a `[e2e]` skip notice and
-returns success. So running `cargo test -- --ignored` on a dev machine without
-credentials is safe.
+If any of the four is unset or empty, every test prints a `[e2e]` skip notice
+and returns success. So running `cargo test -- --ignored` on a dev machine
+without credentials is safe.
+
+Local runs auto-load `<repo>/.env` via `dotenvy::dotenv()` — no manual
+`set -a; source .env` step. CI passes the four secrets through the workflow
+YAML; `dotenvy` doesn't override existing env, so CI wins over any stray
+`.env` left in the checkout.
 
 ## One-time setup
 
 ### Automated path (recommended)
 
-After completing the manual GCP steps below (you'll have a `client_id` in hand),
-a single command handles everything else — the OAuth dance, parent-folder
-creation, and pushing the three secrets to GitHub:
+After completing the manual GCP steps below (you'll have a `client_id` and a
+`client_secret` in hand), a single command handles everything else — the
+OAuth dance, parent-folder creation, the `.env` write, and pushing the four
+secrets to GitHub:
 
 ```sh
 cargo run --example setup_e2e -- \
     --client-id <YOUR_OAUTH_DESKTOP_CLIENT_ID> \
+    --client-secret <YOUR_OAUTH_DESKTOP_CLIENT_SECRET> \
     --config-dir /tmp/air-drive-e2e-setup
 ```
 
-What the script does:
+What the script does, in order:
 
-1. Checks `gh auth status` (you need to be `gh auth login`-ed).
-2. Drives the OAuth dance — your default browser opens, you sign in as the test
-   account, approve. `tokens.json` is written to the `--config-dir` at `0600`.
-3. Looks for an existing `air-drive-e2e-parent` folder under My Drive; reuses
-   it if found, otherwise creates one. Idempotent across re-runs.
-4. Pushes `AIR_DRIVE_E2E_TOKENS`, `AIR_DRIVE_E2E_CLIENT_ID`, and
-   `AIR_DRIVE_E2E_PARENT_FOLDER_ID` to the current repository's Actions
-   secrets via `gh secret set`. Pass `--repo owner/name` to target a different
-   repo.
+1. **`gh auth status`** — fail-fast if not `gh auth login`-ed.
+2. **OAuth dance via `webbrowser::open`** — a default-browser tab opens on
+   the Google consent screen. Sign in with the test account, click **Allow**.
+   `tokens.json` (the refresh token JSON) lands in `--config-dir` at `0600`.
+3. **Parent folder** — looks for an existing `air-drive-e2e-parent` under My
+   Drive; reuses it if found, otherwise creates one. Idempotent.
+4. **`.env`** — writes `<cwd>/.env` (override with `--env-file PATH`) at
+   `0600` containing all four resolved values in `KEY='VALUE'` form. Always
+   written, even with `--dry-run`.
+5. **GitHub Secrets** — pushes the four values via `gh secret set --body`.
+   Pass `--repo owner/name` to target a different repo. Skipped under
+   `--dry-run`.
 
-Pass `--dry-run` to see the resolved values without pushing. Pass
-`--force-new-token` if the cached refresh token expired and you need to
-re-approve.
+Useful flags:
 
-What it can't do (do it once in the Cloud Console):
+- `--dry-run` — keeps everything local (browser, folder, `.env`), skips
+  only the GitHub push. Handy when you're iterating on the script.
+- `--force-new-token` — wipes the cached `tokens.json` so the OAuth dance
+  fires fresh. Use when Google has revoked the refresh token (typical after
+  the 7-day window in `Testing` mode of the consent screen).
+- `--parent-folder-name <NAME>` — override the default folder name when you
+  want to share the same test account across multiple repos.
+
+What the script can't do (do these once in the Cloud Console):
 
 - Create the GCP project.
 - Enable the Drive API.
-- Create the OAuth **Desktop** client (`gcloud` has no command for that
-  specific client type — only IAP/web clients are scriptable).
-
-The remainder of this section is the manual click-by-click for the four
-prerequisite GCP steps.
+- Create the OAuth **Desktop** client. `gcloud` only scripts IAP and Web
+  client types; there's no equivalent for the Desktop variant.
 
 ### 1. Dedicated Google account
 
 Don't use your personal account. Create something like
-`air-drive-ci+yourhandle@gmail.com`. The test parent folder lives in this account's
-My Drive.
+`air-drive-ci+<handle>@gmail.com`. Sign in **with that account** before
+proceeding so the GCP console + browser OAuth dance both pick it up.
 
 ### 2. Google Cloud project + OAuth credentials
 
-1. <https://console.cloud.google.com/> → **New project**, name it `air-drive-ci`.
-2. **APIs & Services → Library → Google Drive API → Enable**.
-3. **APIs & Services → OAuth consent screen**:
-   - User type: **External**, status: **Testing** (Google's review path isn't
-     needed for ourselves).
-   - Add the test account email to **Test users**.
-   - Scopes: add `.../auth/drive.file` and `.../auth/drive.metadata.readonly`.
-4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
+1. <https://console.cloud.google.com/projectcreate> → **New project**, name
+   it `air-drive-ci`.
+2. <https://console.cloud.google.com/apis/library/drive.googleapis.com> →
+   **Enable** the Drive API.
+3. <https://console.cloud.google.com/apis/credentials/consent> — configure
+   the OAuth consent screen:
+   - User type: **External**, status: **Testing** (no Google review needed).
+   - **Test users**: add the test account email. Without this step the
+     OAuth dance fails with `403 access_denied`.
+   - Scopes: `.../auth/drive.file` and `.../auth/drive.metadata.readonly`
+     are requested at runtime — listing them here is optional.
+4. <https://console.cloud.google.com/apis/credentials> → **+ Create
+   credentials → OAuth client ID**:
    - Application type: **Desktop app**.
-   - The resulting client id is the `AIR_DRIVE_E2E_CLIENT_ID` value.
-   - **No client secret** — PKCE handles authentication; the secret is unused.
+   - Copy the `Client ID` (`xxx.apps.googleusercontent.com`).
+   - Copy the `Client secret` (`GOCSPX-...`). Google requires this at the
+     token endpoint even in the Desktop / PKCE flow; the value is
+     distributed with the app, not actually confidential (cf. rclone,
+     gcloud, Insync — all ship a hardcoded one).
 
-### 3. Parent folder
-
-Sign in to Drive as the test account. Create a folder named
-`air-drive-e2e-parent` (or whatever). Open it, copy the folder ID from the URL
-(`https://drive.google.com/drive/folders/<ID>`). That's
-`AIR_DRIVE_E2E_PARENT_FOLDER_ID`.
-
-### 4. Acquire the token + create the parent folder + push the secrets
-
-Use the automated path from the top of this section:
+### 3. Run `setup_e2e`
 
 ```sh
 cargo run --example setup_e2e -- \
-    --client-id <YOUR_AIR_DRIVE_E2E_CLIENT_ID> \
+    --client-id <copied-from-step-2> \
+    --client-secret <copied-from-step-2> \
     --config-dir /tmp/air-drive-e2e-setup
 ```
 
-If you'd rather do it by hand (e.g. for a forked CI account you don't have
-`gh` access to), the legacy manual flow still works:
+Once it finishes, the four GitHub Secrets are set, the `.env` is on disk,
+and the local e2e suite is ready.
 
-1. Run `air-drive link --config-dir /tmp/e2e-setup` to drive the OAuth dance.
-2. Capture `cat /tmp/e2e-setup/tokens.json` as the `AIR_DRIVE_E2E_TOKENS` value.
-3. Create the parent folder manually in the Drive web UI, copy its ID.
-4. In repo settings, `Settings → Secrets and variables → Actions → New
-   repository secret`, add the three secrets:
-   - `AIR_DRIVE_E2E_TOKENS`
-   - `AIR_DRIVE_E2E_CLIENT_ID`
-   - `AIR_DRIVE_E2E_PARENT_FOLDER_ID`
+### Manual fallback (no `gh` access)
 
-The `.github/workflows/e2e.yml` workflow picks them up from
-`secrets.AIR_DRIVE_E2E_*` regardless of how they got there.
+If you can't use the `gh` CLI (forked CI account, restricted PAT…), do
+steps 1–3 above to acquire `tokens.json`, then dry-run the script:
+
+```sh
+cargo run --example setup_e2e -- \
+    --client-id ... --client-secret ... \
+    --config-dir /tmp/e2e-setup --dry-run
+```
+
+The `.env` is written, the folder is created, and the dry-run summary
+prints the four values. Open `Settings → Secrets and variables → Actions`
+in the repo settings and paste each of:
+
+- `AIR_DRIVE_E2E_TOKENS` — content of `/tmp/e2e-setup/tokens.json`
+- `AIR_DRIVE_E2E_CLIENT_ID`
+- `AIR_DRIVE_E2E_CLIENT_SECRET`
+- `AIR_DRIVE_E2E_PARENT_FOLDER_ID`
 
 ## Running locally
 
-```sh
-export AIR_DRIVE_E2E_TOKENS="$(cat /tmp/e2e-setup/tokens.json)"
-export AIR_DRIVE_E2E_CLIENT_ID="..."
-export AIR_DRIVE_E2E_PARENT_FOLDER_ID="..."
+After `setup_e2e` ran successfully:
 
-cargo test --test rclone_drive -- --ignored --nocapture
+```sh
+cargo test --test rclone_drive -- --ignored
 ```
 
-`rclone` MUST be on `$PATH`. Install with `sudo apt install rclone` on Debian /
-Ubuntu, or grab the binary from <https://rclone.org/install>.
+The harness reads `<repo>/.env` automatically via `dotenvy`. `rclone` MUST
+be on `$PATH` (`sudo apt install rclone` on Debian / Ubuntu, or grab a
+binary from <https://rclone.org/install>).
+
+To re-trigger a fresh OAuth dance (expired refresh token), re-run the
+setup script with `--force-new-token` — the `.env` and the secrets are
+re-written from the new state.
 
 ## CI
 
 `.github/workflows/e2e.yml` runs on `push to main` and via
-`workflow_dispatch`. It installs `rclone` via apt and pipes the secrets in. PRs
-don't trigger it — quota stays predictable, and forked PRs can't access the
-secrets anyway.
+`workflow_dispatch`. It installs `rclone` via apt and pipes the four
+secrets in. PRs don't trigger it — quota stays predictable, and forked
+PRs can't access the secrets anyway.
 
-A concurrency group (`e2e-drive`) serialises runs against the same Drive account
-so two simultaneous merges don't fight for quota.
+A concurrency group (`e2e-drive`) serialises runs against the same Drive
+account so two simultaneous merges don't fight for quota.
+
+Trigger a CI run manually:
+
+```sh
+gh workflow run e2e
+gh run watch
+```
 
 ## Isolation + cleanup
 
-Each test creates a fresh sub-folder named `air-drive-e2e-<timestamp>-<hex>`
-under the configured parent. The harness:
+Each test creates a fresh sub-folder named
+`air-drive-e2e-<unix-ts>-<hex>` under the configured parent. The harness:
 
-- Sweeps any `air-drive-e2e-*` folder older than 24 h **before** creating its
-  own — this rescues space leaked by crashed / cancelled runs.
-- Calls `cleanup()` at the end of the test to trash the per-run folder.
-- Errors during cleanup are logged but don't fail the test (the sweep on the
-  next run picks them up).
+- Sweeps any `air-drive-e2e-*` folder older than 24 h **before** creating
+  its own — rescues space leaked by crashed / cancelled runs.
+- Calls `cleanup()` at the end of every test to trash the per-run folder.
+- Errors during cleanup are logged but don't fail the test (the sweep on
+  the next run picks them up).
 
 ## Trade-offs / known limits
 
-- **Quota**: 1 000 requests / 100 s / user. The current scenarios stay well
-  below that, but adding many more files per test will eventually need rate
+- **Quota**: 1 000 requests / 100 s / user. Current scenarios stay well
+  below that; adding many more files per test will eventually need rate
   limiting in the harness.
-- **Refresh token expiry**: Google revokes tokens after ~6 months of inactivity,
-  and apps in `Testing` mode on the OAuth consent screen cap refresh-token
-  lifetime at 7 days. Either re-acquire periodically OR move the consent screen
-  to `Production` (requires Google to verify scopes — for a `drive.file`-only
-  app this is approval-light).
-- **Concurrency**: workflow-level concurrency group avoids parallel runs against
-  the same account. Two engineers running locally at the same time can still
-  collide; UUID-named folders mitigate the worst of it.
+- **Refresh token expiry**: Google revokes tokens after ~6 months of
+  inactivity, and apps in `Testing` mode on the consent screen cap
+  refresh-token lifetime at 7 days. Either re-run `setup_e2e
+  --force-new-token` periodically, OR move the consent screen to
+  `Production` (Google reviews scopes — `drive.file` is approval-light).
+- **Concurrency**: the workflow-level concurrency group avoids parallel
+  CI runs against the same account. Two engineers running locally at the
+  same time can still collide; UUID-named per-run folders mitigate the
+  worst of it.
 - **No `service account` path**: the spec targets personal Drive sync via
-  OAuth — service accounts don't apply (they only see Shared Drives, which
-  require a paid Workspace plan).
+  OAuth — service accounts don't apply (they only see Shared Drives,
+  which require a paid Workspace plan).
