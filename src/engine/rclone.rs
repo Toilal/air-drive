@@ -68,12 +68,12 @@ const REMOTE_NAME: &str = "airdrive";
 
 /// rclone-backed sync engine.
 ///
-/// Hybrid: uploads + moves + deletes go through the resolved rclone binary
-/// (chunked uploads, retries, parallelism); downloads go through `DriveHttp`'s
-/// `GET files/{id}?alt=media` instead. Doing downloads via rclone would mean
-/// looking up the file's name + parent first because rclone addresses by path,
-/// not by id — and the simpler "stream from Drive REST" is already battle-
-/// tested by `HttpEngine`.
+/// Every transfer goes through the rclone binary so we get its chunked /
+/// parallel / resumable machinery for both directions. For downloads we have
+/// to do a one-shot `files.get` against DriveHttp first because rclone's
+/// Drive backend addresses by path, not by id, and we want to fetch by id;
+/// the lookup gives us the file's name + parent id, which we then plug into
+/// `rclone copyto airdrive:<name> <staging> --drive-root-folder-id <parent>`.
 #[derive(Clone)]
 pub struct RcloneEngine {
     binary: RcloneBinary,
@@ -81,9 +81,8 @@ pub struct RcloneEngine {
     client_id: Option<String>,
     /// Watched local root, used as the base for [`staging::stage_path`] on downloads.
     local_root: PathBuf,
-    /// Shared Drive REST client. Used for downloads (`alt=media`) — rclone has
-    /// no clean "fetch by file id" primitive without a follow-up `lsjson` to
-    /// resolve the path first.
+    /// Shared Drive REST client. Used for the metadata lookup that precedes
+    /// every `download` (rclone Drive addresses by path; we have the id).
     http: DriveHttp,
 }
 
@@ -224,22 +223,45 @@ impl SyncEngine for RcloneEngine {
         };
         let staging_path = staging::stage_path(staging_root, &op_id)?;
 
-        // Stream via DriveHttp — rclone's Drive backend addresses by path, not
-        // by id, and the path lookup would cost an extra `lsjson` round-trip.
-        // Same wire protocol as HttpEngine but reuses the rclone-side staging
-        // directory we already computed above.
-        let path = format!("files/{remote_id}");
-        let bytes = match self.http.get_bytes(&path, &[("alt", "media")]).await {
-            Ok(b) => b,
-            Err(e) => {
-                staging::discard(&staging_path)?;
-                return Err(e);
-            }
-        };
-        tokio::fs::write(&staging_path, &bytes).await.map_err(|e| {
-            let _ = staging::discard(&staging_path);
-            Error::Io(e)
-        })?;
+        // Look up name + parent so we can address the file the way rclone wants
+        // it (`<remote>:<path>` with `--drive-root-folder-id <folder>`). One
+        // cheap GET against `files.get?fields=name,parents` — much cheaper than
+        // streaming the bytes through this process when the file is large
+        // (rclone's chunked + parallel download takes over for the actual
+        // transfer).
+        let meta =
+            match crate::drive::metadata::get_file_raw(&self.http, remote_id, "id,name,parents")
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    staging::discard(&staging_path)?;
+                    return Err(e);
+                }
+            };
+        let name = meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Drive(format!("file {remote_id} has no `name`")))?
+            .to_owned();
+        let parent_id = meta
+            .get("parents")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| Error::Drive(format!("file {remote_id} has no `parents`")))?
+            .to_owned();
+
+        let mut cmd = self.base_command().await?;
+        cmd.arg("copyto")
+            .arg(format!("{REMOTE_NAME}:{name}"))
+            .arg(&staging_path)
+            .arg("--drive-root-folder-id")
+            .arg(&parent_id);
+        if let Err(e) = self.run(cmd).await {
+            staging::discard(&staging_path)?;
+            return Err(e);
+        }
         staging::promote(&staging_path, local)?;
         Ok(())
     }
