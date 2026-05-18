@@ -1,0 +1,141 @@
+[package]
+name = "air-drive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Open source Google Drive sync client for Linux, event-driven on both sides."
+repository = "https://github.com/Toilal/air-drive"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "sync",
+    "fs",
+    "io-util",
+    "process",
+    "net",
+    "time",
+] }
+
+# Local filesystem watcher
+notify = "6"
+
+# HTTP + JSON
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+
+# Google OAuth (PKCE flow for desktop apps)
+yup-oauth2 = "11"
+
+# Embedded SQLite (async wrapper + the underlying rusqlite for params! and types)
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio-rusqlite = "0.5"
+
+# Async trait support (for `SyncEngine`)
+async-trait = "0.1"
+
+# Cooperative cancellation token for the daemon's tokio::select! loops.
+tokio-util = "0.7"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Errors and tracing
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Process-level file lock for single-instance enforcement via BSD flock(2) semantics
+# (per open-file-description, so two opens of the same file in the same process compete
+# for the lock — required for our test coverage and for catching `air-drive setup` +
+# `air-drive start` accidentally racing).
+nix = { version = "0.29", features = ["fs", "signal"] }
+
+# TOML config
+toml = "0.8"
+
+# XDG path resolution
+directories = "5"
+
+# RNG for jitter on retry backoff
+rand = "0.8"
+
+# Local file fingerprint (FR-007 — md5 against remote.md5Checksum)
+md-5 = "0.10"
+hex = "0.4"
+
+# Open the OAuth consent URL in the user's default browser during `air-drive link`
+# and the e2e setup script. Cross-platform shim around xdg-open / start / open.
+webbrowser = "1"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+# Integration test helpers
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"
+md-5 = "0.10"
+hex = "0.4"
+# Auto-load `<repo>/.env` for local e2e runs so developers don't need to
+# `set -a; source .env; set +a` every shell. CI passes env vars directly.
+dotenvy = "0.15"
+# Validate the `status --json` output against `contracts/status.schema.json`
+# (Phase 5 / FR-008).
+jsonschema = "0.28"
+
+# Integration tests live under tests/integration/ rather than at the default
+# tests/ root so the layout mirrors the spec (specs/001-minimal-sync-daemon/tasks.md).
+# Each subfolder is one Cargo "test" target sharing the common harness via `mod common`.
+[[test]]
+name = "initial_sync"
+path = "tests/integration/initial_sync.rs"
+
+[[test]]
+name = "continuous_sync"
+path = "tests/integration/continuous_sync.rs"
+
+[[test]]
+name = "status"
+path = "tests/integration/status.rs"
+
+[[test]]
+name = "multi_instance"
+path = "tests/integration/multi_instance.rs"
+
+[[test]]
+name = "conflict"
+path = "tests/integration/conflict.rs"
+
+[[test]]
+name = "relink"
+path = "tests/integration/relink.rs"
+
+# End-to-end suite that hits the real Google Drive API + the real rclone binary.
+# Every test is `#[ignore]`d so the default `cargo test` skips them; CI runs them
+# via `cargo test --test rclone_drive -- --ignored` from a dedicated workflow with
+# the secrets piped through env vars. See tests/e2e/README.md.
+[[test]]
+name = "rclone_drive"
+path = "tests/e2e/rclone_drive.rs"

@@ -1,0 +1,434 @@
+//! Pending-operation dispatcher (T055, T055b).
+//!
+//! Pulls due operations from `pending_operation` and executes them via the
+//! configured [`SyncEngine`]. On success the row is removed; on failure the
+//! dispatcher applies exponential back-off with ±20 % jitter (1 s → 60 s, max
+//! [`MAX_ATTEMPTS`] tries) and reschedules. After [`MAX_ATTEMPTS`] failures the
+//! op is left in place with its `last_error` populated — a future Phase 5 will
+//! surface that as `status: blocked`.
+//!
+//! The dispatcher loop wakes every [`POLL_INTERVAL`] or whenever a new op is
+//! enqueued via the wake channel (the reconciler signals on enqueue to skip
+//! the polling delay for the common no-op-in-flight case).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rand::Rng;
+use serde_json::Value;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
+
+use crate::daemon::in_flight::InFlightOps;
+use crate::daemon::pause::PauseState;
+use crate::drive::http::DriveHttp;
+use crate::engine::SyncEngine;
+use crate::error::{Error, Result};
+use crate::reconcile::fingerprint;
+use crate::state::Db;
+use crate::state::items;
+use crate::state::meta::{self, BlockedKind};
+use crate::state::ops::{self, Operation, PendingOperation};
+use crate::state::unix_now;
+
+/// Maximum number of attempts before the dispatcher abandons an op.
+pub const MAX_ATTEMPTS: i64 = 10;
+
+/// How often the dispatcher checks for due ops when idle.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Initial backoff (after attempt 1).
+const INITIAL_BACKOFF_SECS: i64 = 1;
+
+/// Hard cap on a single backoff delay before jitter.
+const MAX_BACKOFF_SECS: i64 = 60;
+
+/// Daemon dispatcher loop.
+///
+/// `wake` is signalled by the reconciler whenever it enqueues a new op so the
+/// dispatcher doesn't wait the full `POLL_INTERVAL` to react.
+#[allow(clippy::too_many_arguments)] // wiring 9 collaborators by name is clearer than a struct
+pub async fn run(
+    db: Db,
+    engine: Arc<dyn SyncEngine>,
+    http: DriveHttp,
+    local_root: PathBuf,
+    remote_root_id: String,
+    wake: Arc<Notify>,
+    cancel: CancellationToken,
+    in_flight: InFlightOps,
+    pause: PauseState,
+) -> Result<()> {
+    loop {
+        // Block cooperatively while paused. `wait_for_resume` returns instantly
+        // when running, so the running-path overhead is one atomic read.
+        if pause.is_paused() {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Ok(()),
+                _ = pause.wait_for_resume() => {}
+            }
+        }
+        // Block when the daemon is in a `state_meta.blocked_kind != NULL`
+        // state. Today no worker auto-clears blocked — recovery happens when
+        // the user re-runs `air-drive link` (which writes a fresh token) and
+        // either restarts the daemon or invokes a follow-up "clear" path
+        // (TODO). Sleeping with a long timeout lets the cancellation token
+        // still propagate cleanly.
+        if meta::get_blocked(db.connection()).await?.is_some() {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(Duration::from_secs(30)) => continue,
+            }
+        }
+        // Drain everything that's due before sleeping.
+        loop {
+            let Some(op) = ops::next_due(db.connection(), unix_now()).await? else {
+                break;
+            };
+            if op.attempts >= MAX_ATTEMPTS {
+                tracing::error!(
+                    op_id = op.id.0,
+                    attempts = op.attempts,
+                    "abandoning operation — manual resolution required"
+                );
+                // Move it far into the future so we don't busy-loop on it.
+                ops::mark_attempt(
+                    db.connection(),
+                    op.id,
+                    Some("max attempts reached"),
+                    unix_now() + 3600,
+                )
+                .await
+                .ok();
+                continue;
+            }
+            match execute(
+                &db,
+                &engine,
+                &http,
+                &local_root,
+                &remote_root_id,
+                &in_flight,
+                &op,
+            )
+            .await
+            {
+                Ok(()) => {
+                    // T060 — bump the last_sync_at + items_uploaded /
+                    // items_downloaded counters that `air-drive status`
+                    // surfaces. Upload/RenameRemote count as uploaded;
+                    // Download as downloaded; deletes don't increment
+                    // anything (the conflict + status schema doesn't track
+                    // them separately).
+                    let (delta_up, delta_down) = match op.op {
+                        Operation::Upload | Operation::RenameRemote => (1, 0),
+                        Operation::Download => (0, 1),
+                        _ => (0, 0),
+                    };
+                    if delta_up != 0 || delta_down != 0 {
+                        meta::record_sync_cycle(db.connection(), unix_now(), delta_up, delta_down)
+                            .await
+                            .ok();
+                    }
+                    ops::delete(db.connection(), op.id).await.ok();
+                }
+                Err(Error::Oauth(msg)) => {
+                    // OAuth failure: refreshing the access token failed or
+                    // the server responded 401. Persist the blocked state so
+                    // `air-drive status` surfaces it, then push the op far
+                    // into the future. The outer loop sees the blocked flag
+                    // and sleeps — no point burning retries on auth.
+                    tracing::error!(
+                        op_id = op.id.0,
+                        error = %msg,
+                        "auth failure — daemon is now blocked (FR-009)"
+                    );
+                    meta::set_blocked(db.connection(), BlockedKind::Auth, &msg, unix_now())
+                        .await
+                        .ok();
+                    ops::mark_attempt(
+                        db.connection(),
+                        op.id,
+                        Some(&format!("blocked: {msg}")),
+                        unix_now() + 3600,
+                    )
+                    .await
+                    .ok();
+                    break; // exit the drain loop; the outer loop catches blocked
+                }
+                Err(e) => {
+                    let delay = backoff_seconds(op.attempts + 1);
+                    let next = unix_now() + delay;
+                    tracing::warn!(
+                        op_id = op.id.0,
+                        attempts = op.attempts + 1,
+                        retry_in_s = delay,
+                        error = %e,
+                        "op failed; will retry"
+                    );
+                    ops::mark_attempt(db.connection(), op.id, Some(&e.to_string()), next)
+                        .await
+                        .ok();
+                }
+            }
+        }
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
+            _ = wake.notified() => {}
+            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+        }
+    }
+}
+
+async fn execute(
+    db: &Db,
+    engine: &Arc<dyn SyncEngine>,
+    http: &DriveHttp,
+    local_root: &std::path::Path,
+    remote_root_id: &str,
+    in_flight: &InFlightOps,
+    op: &PendingOperation,
+) -> Result<()> {
+    let item = items::get_by_id(db.connection(), op.sync_item_id)
+        .await?
+        .ok_or_else(|| Error::Mapping(format!("sync_item {} vanished", op.sync_item_id.0)))?;
+
+    match op.op {
+        Operation::Upload => {
+            let local = local_root.join(&item.relative_path);
+            if !local.is_file() {
+                // The file was deleted between enqueue and execution — abandon
+                // this op without erroring; the delete event will arrive too.
+                return Ok(());
+            }
+            let (size, md5) = match fingerprint::compute_local(&local).await {
+                Ok(v) => v,
+                Err(Error::Io(io)) if io.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Err(Error::Mapping(format!(
+                        "EACCES on {} — caller will retry",
+                        local.display()
+                    )));
+                }
+                Err(e) => return Err(e),
+            };
+
+            // Echo suppression: the reconciler enqueues an Upload for every local
+            // Modified/Created event without computing the fingerprint first
+            // (cf. `reconcile::continuous::apply_local`). If the file's current
+            // hash matches what `sync_item` already records, the event was either
+            // a no-op `mv`/`touch` or the watcher-echo of a Download we just
+            // performed — skip the engine call entirely.
+            if item.md5.as_deref() == Some(&md5) && item.size == Some(size) {
+                return Ok(());
+            }
+
+            match item.remote_id.as_deref() {
+                Some(rid) => {
+                    // Mark the existing remote ID as in-flight so the poller's
+                    // `apply_remote` skips the change event Drive will emit for
+                    // this update. Guard drops at function return → set cleared
+                    // automatically, even on the error path.
+                    let _guard = in_flight.mark(rid);
+                    engine.update(rid, &local).await?;
+                    items::update_fingerprint(
+                        db.connection(),
+                        item.id,
+                        Some(size),
+                        Some(&md5),
+                        unix_now(),
+                    )
+                    .await?;
+                }
+                None => {
+                    let (parent_rel, name) = split_parent(&item.relative_path);
+                    let parent_id = ensure_remote_folder(http, remote_root_id, parent_rel).await?;
+                    let rf = engine.upload(&local, &parent_id, name).await?;
+                    // Now we know the brand-new remote id — register it as
+                    // in-flight before any other state mutation. The poller may
+                    // already have noticed the create between `engine.upload`
+                    // returning and this `mark` call (a few µs at most); for
+                    // that microscopic window the sync_item's UNIQUE
+                    // constraint on (mapping_id, relative_path) blocks a
+                    // duplicate insert. The mark guarantees subsequent ticks
+                    // skip the echo cleanly.
+                    let _guard = in_flight.mark(&rf.id);
+                    items::set_remote_id(db.connection(), item.id, &rf.id).await?;
+                    items::update_fingerprint(
+                        db.connection(),
+                        item.id,
+                        Some(size),
+                        Some(&md5),
+                        unix_now(),
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        Operation::Download => {
+            let payload = parse_payload(&op.payload);
+            let remote_id = payload
+                .get("remote_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::Mapping("Download op missing remote_id".into()))?;
+            let rel = payload
+                .get("relative_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| item.relative_path.clone());
+
+            let local = local_root.join(&rel);
+            if let Some(parent) = local.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::StorageFull {
+                        // FR-022: don't try to write partials when the disk is full.
+                        Error::Mapping(format!("ENOSPC creating parent of {}", local.display()))
+                    } else {
+                        Error::Io(e)
+                    }
+                })?;
+            }
+            engine.download(remote_id, &local, local_root).await?;
+
+            let (size, md5) = fingerprint::compute_local(&local).await?;
+            items::update_fingerprint(db.connection(), item.id, Some(size), Some(&md5), unix_now())
+                .await?;
+            // Make sure the sync_item knows the remote_id, in case this was a
+            // brand-new remote create.
+            if item.remote_id.as_deref() != Some(remote_id) {
+                items::set_remote_id(db.connection(), item.id, remote_id).await?;
+            }
+        }
+
+        Operation::DeleteRemote => {
+            if let Some(rid) = &item.remote_id {
+                // Mark in-flight so the poller's `removed` event doesn't
+                // re-enqueue a `DeleteLocal` for the file we're already
+                // deleting end-to-end.
+                let _guard = in_flight.mark(rid);
+                engine.delete_remote(rid).await?;
+            }
+            items::delete(db.connection(), item.id).await?;
+        }
+
+        Operation::DeleteLocal => {
+            let local = local_root.join(&item.relative_path);
+            match tokio::fs::remove_file(&local).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::Io(e)),
+            }
+            items::delete(db.connection(), item.id).await?;
+        }
+
+        Operation::RenameRemote => {
+            let payload = parse_payload(&op.payload);
+            let new_rel = payload
+                .get("new_relative_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    Error::Mapping("RenameRemote op missing new_relative_path".into())
+                })?;
+            let Some(rid) = &item.remote_id else {
+                // Renamed before the first upload landed — drop op, the
+                // create-with-the-new-path will be picked up on the next walk.
+                items::delete(db.connection(), item.id).await?;
+                return Ok(());
+            };
+            let (parent_rel, new_name) = split_parent(new_rel);
+            let new_parent_id = ensure_remote_folder(http, remote_root_id, parent_rel).await?;
+            // Mark in-flight: Drive emits a change event for the renamed file,
+            // and even though our md5 echo check would handle it, suppressing
+            // the round-trip saves the poller a redundant `apply_remote` walk.
+            let _guard = in_flight.mark(rid);
+            engine.move_remote(rid, &new_parent_id, new_name).await?;
+            items::set_relative_path(db.connection(), item.id, new_rel).await?;
+        }
+
+        // The remaining variants (RenameLocal / CreateDir* / MarkConflict) are
+        // not produced by the current reconciler. We log + drop the op so a
+        // stale row from an earlier version doesn't wedge the queue.
+        other => {
+            tracing::warn!(?other, op_id = op.id.0, "no dispatcher path for op");
+        }
+    }
+    Ok(())
+}
+
+/// Walk `parent_rel` segment by segment under `root_id`, creating Drive folders
+/// on the fly. Mirrors `reconcile::ensure_remote_folder` but stateless — for the
+/// MVP we re-walk the chain every time; the test set is small. Caching is a
+/// follow-up.
+async fn ensure_remote_folder(http: &DriveHttp, root_id: &str, parent_rel: &str) -> Result<String> {
+    if parent_rel.is_empty() {
+        return Ok(root_id.to_owned());
+    }
+    let mut current = root_id.to_owned();
+    for seg in parent_rel.split('/').filter(|s| !s.is_empty()) {
+        let children = crate::drive::metadata::list_children(http, &current).await?;
+        let existing = children
+            .into_iter()
+            .find(|c| c.is_folder() && c.name == seg);
+        current = match existing {
+            Some(f) => f.id,
+            None => {
+                crate::drive::metadata::create_folder(http, &current, seg)
+                    .await?
+                    .id
+            }
+        };
+    }
+    Ok(current)
+}
+
+fn split_parent(rel: &str) -> (&str, &str) {
+    match rel.rsplit_once('/') {
+        Some((parent, name)) => (parent, name),
+        None => ("", rel),
+    }
+}
+
+fn parse_payload(s: &Option<String>) -> Value {
+    s.as_deref()
+        .and_then(|x| serde_json::from_str(x).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// Exponential backoff with jitter. `attempt` is 1-indexed: 1, 2, 4, 8, ... s.
+fn backoff_seconds(attempt: i64) -> i64 {
+    let base = INITIAL_BACKOFF_SECS << ((attempt - 1).clamp(0, 6) as u32);
+    let capped = base.min(MAX_BACKOFF_SECS);
+    let jitter_range = (capped / 5).max(1);
+    let mut rng = rand::thread_rng();
+    let delta: i64 = rng.gen_range(-jitter_range..=jitter_range);
+    (capped + delta).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_climbs_then_caps() {
+        // Attempt 1 lands somewhere around 1 s.
+        let a1 = backoff_seconds(1);
+        assert!((1..=2).contains(&a1), "got {a1}");
+        // Attempt 7+ caps at ~60 s ± jitter.
+        for n in 7..=10 {
+            let b = backoff_seconds(n);
+            assert!((48..=72).contains(&b), "attempt {n}: {b}");
+        }
+    }
+
+    #[test]
+    fn split_parent_works() {
+        assert_eq!(split_parent("a.txt"), ("", "a.txt"));
+        assert_eq!(split_parent("dir/a.txt"), ("dir", "a.txt"));
+        assert_eq!(split_parent("a/b/c.txt"), ("a/b", "c.txt"));
+    }
+}

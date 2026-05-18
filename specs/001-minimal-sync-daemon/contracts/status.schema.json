@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://air-drive.dev/schemas/status.v1.json",
+  "title": "air-drive status output (v1)",
+  "description": "Schema for `air-drive status --json` output. The contract for FR-008.",
+  "type": "object",
+  "required": ["schema_version", "state", "pending", "last_sync", "conflicts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "state": {
+      "type": "string",
+      "enum": ["idle", "syncing", "paused", "blocked", "error"],
+      "description": "Coarse daemon state. 'blocked' means the daemon is alive but cannot make progress (e.g., needs a re-link). 'error' is a fatal-but-non-exit condition surfaced to the user."
+    },
+    "account": {
+      "type": ["object", "null"],
+      "required": ["email"],
+      "additionalProperties": false,
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "linked_at": { "type": "integer", "description": "Unix epoch seconds" }
+      }
+    },
+    "mapping": {
+      "type": ["object", "null"],
+      "required": ["local_path", "remote_folder_name"],
+      "additionalProperties": false,
+      "properties": {
+        "local_path": { "type": "string" },
+        "remote_folder_name": { "type": "string" },
+        "remote_folder_id": { "type": "string" }
+      }
+    },
+    "pending": {
+      "type": "object",
+      "required": ["uploads", "downloads", "renames", "deletes"],
+      "additionalProperties": false,
+      "properties": {
+        "uploads": { "type": "integer", "minimum": 0 },
+        "downloads": { "type": "integer", "minimum": 0 },
+        "renames": { "type": "integer", "minimum": 0 },
+        "deletes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "last_sync": {
+      "type": ["object", "null"],
+      "required": ["timestamp", "items_uploaded", "items_downloaded"],
+      "additionalProperties": false,
+      "properties": {
+        "timestamp": { "type": "integer", "description": "Unix epoch seconds of the last successful sync cycle" },
+        "items_uploaded": { "type": "integer", "minimum": 0 },
+        "items_downloaded": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "last_error": {
+      "type": ["object", "null"],
+      "required": ["message", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "message": { "type": "string", "description": "One-line, user-facing summary" },
+        "at": { "type": "integer", "description": "Unix epoch seconds" },
+        "kind": {
+          "type": "string",
+          "enum": ["transient", "auth", "quota", "io", "remote", "mapping", "config", "internal"],
+          "description": "auth = OAuth refresh hard-fail (FR-009); remote = watched remote folder gone (FR-020); mapping = watched local path missing (FR-023); transient = retry-eligible (FR-012); quota = API rate limit reached; io = local filesystem error (FR-021); config = invalid configuration (e.g. bad OAuth client_id override); internal = unexpected daemon-side error."
+        }
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "description": "Unresolved conflicts. One element per ConflictRecord row.",
+      "items": {
+        "type": "object",
+        "required": ["original_path", "conflict_path", "detected_at"],
+        "additionalProperties": false,
+        "properties": {
+          "original_path": { "type": "string", "description": "Canonical name (remote version)" },
+          "conflict_path": { "type": "string", "description": "`<stem>.conflict-<UTC-ts>.<ext>` name preserving the local version" },
+          "detected_at": { "type": "integer", "description": "Unix epoch seconds" }
+        }
+      }
+    },
+    "pid": {
+      "type": ["integer", "null"],
+      "description": "PID of the running daemon if any; null when status is run while no daemon is up."
+    },
+    "rclone": {
+      "type": ["object", "null"],
+      "required": ["path", "version", "source"],
+      "additionalProperties": false,
+      "description": "The rclone binary the daemon resolved at startup. Null before the daemon has started for the first time.",
+      "properties": {
+        "path": { "type": "string", "description": "Absolute path to the resolved rclone binary" },
+        "version": { "type": "string", "description": "Version reported by `rclone version`, e.g. \"1.65.2\"" },
+        "source": {
+          "type": "string",
+          "enum": ["config", "path", "cache", "downloaded"],
+          "description": "Where the binary came from. See research.md §5."
+        }
+      }
+    }
+  }
+}

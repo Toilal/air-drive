@@ -1,0 +1,32 @@
+[Unit]
+Description=air-drive — Google Drive sync daemon
+Documentation=https://github.com/Toilal/air-drive
+# Run after the user has a network. Without this the daemon would crash-loop
+# while DNS is unreachable; the dispatcher's backoff handles transient drops
+# once we are up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/air-drive start
+# Restart on crash but not on clean exit (the user may stop the daemon
+# deliberately via `systemctl --user stop` or SIGTERM). 5 s back-off matches
+# the dispatcher's typical retry cadence.
+Restart=on-failure
+RestartSec=5
+# `journalctl --user -u air-drive` is the canonical log destination.
+# tracing-subscriber's default formatter writes to stderr → journald.
+StandardOutput=journal
+StandardError=journal
+
+# Small footprint: no need for elevated capabilities; rclone subprocess
+# inherits the same set.
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+RestrictNamespaces=true
+
+[Install]
+WantedBy=default.target
