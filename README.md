@@ -40,6 +40,25 @@ truth and any change goes through the constitution flow.
 
 ## Install (Linux, systemd)
 
+### One-liner
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Toilal/air-drive/main/install.sh | bash
+```
+
+The script picks the right target triple for your kernel/arch (defaults to the
+fully-static `musl` build), pulls the latest release tarball from the GitHub
+Release page, verifies its SHA-256 against the published `.sha256` sibling, and
+drops `air-drive` into `~/.local/bin/`. Pass `--systemd` to also enable the
+systemd user unit:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Toilal/air-drive/main/install.sh \
+    | bash -s -- --systemd
+```
+
+### From source
+
 After building (`cargo build --release` → `target/release/air-drive`), drop the binary
 on your `$PATH` and let `setup --install-service` drop the systemd user unit:
 
