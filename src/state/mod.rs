@@ -17,6 +17,7 @@ pub mod conflicts;
 pub mod cursor;
 pub mod items;
 pub mod mapping;
+pub mod meta;
 pub mod ops;
 pub mod schema;
 

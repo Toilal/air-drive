@@ -128,6 +128,10 @@ path = "tests/integration/multi_instance.rs"
 name = "conflict"
 path = "tests/integration/conflict.rs"
 
+[[test]]
+name = "relink"
+path = "tests/integration/relink.rs"
+
 # End-to-end suite that hits the real Google Drive API + the real rclone binary.
 # Every test is `#[ignore]`d so the default `cargo test` skips them; CI runs them
 # via `cargo test --test rclone_drive -- --ignored` from a dedicated workflow with

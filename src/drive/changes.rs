@@ -119,6 +119,21 @@ pub async fn run(
             .await
         {
             Ok(v) => v,
+            Err(crate::error::Error::Oauth(msg)) => {
+                // OAuth refresh / 401 — persist the blocked flag so the
+                // status surface reports "re-link account" and stop polling
+                // until the user resolves it (FR-009). The dispatcher follows
+                // the same code path on the next op attempt.
+                tracing::error!(error = %msg, "auth failure on changes.list — daemon blocked");
+                let _ = crate::state::meta::set_blocked(
+                    db.connection(),
+                    crate::state::meta::BlockedKind::Auth,
+                    &msg,
+                    unix_now(),
+                )
+                .await;
+                continue;
+            }
             Err(e) => {
                 // Transient failures are common (network, 503). Don't move the
                 // cursor — we'll retry on the next tick.

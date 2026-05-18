@@ -28,6 +28,7 @@ use crate::error::{Error, Result};
 use crate::reconcile::fingerprint;
 use crate::state::Db;
 use crate::state::items;
+use crate::state::meta::{self, BlockedKind};
 use crate::state::ops::{self, Operation, PendingOperation};
 use crate::state::unix_now;
 
@@ -69,6 +70,19 @@ pub async fn run(
                 _ = pause.wait_for_resume() => {}
             }
         }
+        // Block when the daemon is in a `state_meta.blocked_kind != NULL`
+        // state. Today no worker auto-clears blocked — recovery happens when
+        // the user re-runs `air-drive link` (which writes a fresh token) and
+        // either restarts the daemon or invokes a follow-up "clear" path
+        // (TODO). Sleeping with a long timeout lets the cancellation token
+        // still propagate cleanly.
+        if meta::get_blocked(db.connection()).await?.is_some() {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(Duration::from_secs(30)) => continue,
+            }
+        }
         // Drain everything that's due before sleeping.
         loop {
             let Some(op) = ops::next_due(db.connection(), unix_now()).await? else {
@@ -104,6 +118,30 @@ pub async fn run(
             {
                 Ok(()) => {
                     ops::delete(db.connection(), op.id).await.ok();
+                }
+                Err(Error::Oauth(msg)) => {
+                    // OAuth failure: refreshing the access token failed or
+                    // the server responded 401. Persist the blocked state so
+                    // `air-drive status` surfaces it, then push the op far
+                    // into the future. The outer loop sees the blocked flag
+                    // and sleeps — no point burning retries on auth.
+                    tracing::error!(
+                        op_id = op.id.0,
+                        error = %msg,
+                        "auth failure — daemon is now blocked (FR-009)"
+                    );
+                    meta::set_blocked(db.connection(), BlockedKind::Auth, &msg, unix_now())
+                        .await
+                        .ok();
+                    ops::mark_attempt(
+                        db.connection(),
+                        op.id,
+                        Some(&format!("blocked: {msg}")),
+                        unix_now() + 3600,
+                    )
+                    .await
+                    .ok();
+                    break; // exit the drain loop; the outer loop catches blocked
                 }
                 Err(e) => {
                     let delay = backoff_seconds(op.attempts + 1);

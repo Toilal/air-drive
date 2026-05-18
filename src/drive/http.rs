@@ -340,9 +340,16 @@ async fn empty_or_err(resp: reqwest::Response) -> Result<()> {
 }
 
 fn http_error(status: reqwest::StatusCode, body: String) -> Error {
-    // Preserve enough context for the retry loop to detect transient-ness later via
-    // is_transient() and for higher-level callers to format diagnostics.
-    Error::Drive(format!("HTTP {status}: {body}"))
+    // Classify auth failures (401) separately from generic Drive errors so the
+    // dispatcher / poller can flip the daemon to `blocked` instead of
+    // retrying forever. 403 stays on the Drive side because Google uses it
+    // for both permission denials and quota / not-allowed-by-policy, which
+    // are NOT necessarily fatal auth failures.
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        Error::Oauth(format!("HTTP 401: {body}"))
+    } else {
+        Error::Drive(format!("HTTP {status}: {body}"))
+    }
 }
 
 fn map_reqwest(e: reqwest::Error) -> Error {

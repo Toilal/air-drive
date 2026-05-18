@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -244,6 +244,10 @@ pub struct DriveMock {
     /// at higher wiremock priority than the real responders so a positive value
     /// short-circuits every request to `HTTP 503` until it hits zero.
     pub fail_budget: Arc<AtomicUsize>,
+    /// Always-on 401 flag, used by T063 (refresh-token revoked → daemon goes
+    /// `blocked`). Higher wiremock priority than the 503 gate so when both
+    /// fire, 401 wins.
+    pub auth_failing: Arc<AtomicBool>,
 }
 
 impl DriveMock {
@@ -254,13 +258,25 @@ impl DriveMock {
         let server = MockServer::start().await;
         let state = Arc::new(Mutex::new(DriveState::new("alice@example.com")));
         let fail_budget = Arc::new(AtomicUsize::new(0));
+        let auth_failing = Arc::new(AtomicBool::new(false));
 
-        // Higher-priority gate that turns every request into a 503 as long as the
-        // fail budget is positive. Mounted FIRST so wiremock picks it before the
-        // real handlers when the matcher fires.
+        // Top-priority gate: when `auth_failing` is set, every request answers
+        // 401 (T063 — refresh token revoked). Distinct from the 503 budget
+        // because auth failures aren't retried by the daemon; they flip the
+        // `state_meta.blocked_kind` flag. wiremock priority is "lower number
+        // = higher precedence" but the minimum value it accepts is 1.
+        Mock::given(AuthFailMatcher(auth_failing.clone()))
+            .respond_with(AuthFailResponder)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+
+        // 503 gate at priority 2 — lower precedence than the 401 gate so when
+        // both apply, the 401 wins (semantically: refresh failure beats
+        // transient outage).
         Mock::given(FailMatcher(fail_budget.clone()))
             .respond_with(FailResponder(fail_budget.clone()))
-            .with_priority(1)
+            .with_priority(2)
             .mount(&server)
             .await;
 
@@ -370,6 +386,7 @@ impl DriveMock {
             server,
             state,
             fail_budget,
+            auth_failing,
         }
     }
 
@@ -378,6 +395,19 @@ impl DriveMock {
     /// the T049 test to simulate a transient Drive outage.
     pub fn fail_next_n(&self, n: usize) {
         self.fail_budget.store(n, Ordering::Relaxed);
+    }
+
+    /// Flip the mock into "always 401" mode — every request answers
+    /// `401 Unauthorized` until [`stop_auth_failures`] flips it back. Used by
+    /// the T063 test to drive the daemon's `state_meta.blocked_kind = auth`
+    /// path (FR-009).
+    pub fn start_auth_failures(&self) {
+        self.auth_failing.store(true, Ordering::Relaxed);
+    }
+
+    /// Restore healthy auth responses.
+    pub fn stop_auth_failures(&self) {
+        self.auth_failing.store(false, Ordering::Relaxed);
     }
 
     /// Drop any pending 503-injection budget. Useful for tests that flip the mock
@@ -432,6 +462,24 @@ impl DriveMock {
 
 /// wiremock matcher that fires while the [`DriveMock`]'s fail budget is positive.
 /// Paired with [`FailResponder`] at priority 1 so it overrides the real handlers.
+/// Top-priority gate for the auth-failure test scenario: while the
+/// `auth_failing` flag is set, every Drive HTTP call answers 401, which the
+/// daemon classifies as `Error::Oauth` and which flips it to the blocked
+/// state.
+struct AuthFailMatcher(Arc<AtomicBool>);
+impl Match for AuthFailMatcher {
+    fn matches(&self, _req: &Request) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+struct AuthFailResponder;
+impl Respond for AuthFailResponder {
+    fn respond(&self, _req: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(401).set_body_string("Unauthorized: invalid_grant")
+    }
+}
+
 struct FailMatcher(Arc<AtomicUsize>);
 impl Match for FailMatcher {
     fn matches(&self, _req: &Request) -> bool {

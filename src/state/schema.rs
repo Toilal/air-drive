@@ -13,7 +13,7 @@
 //! `specs/001-minimal-sync-daemon/data-model.md`.
 
 /// Latest schema version this binary knows how to apply.
-pub const LATEST_VERSION: i64 = 1;
+pub const LATEST_VERSION: i64 = 2;
 
 /// Unconditional bootstrap: ensures `schema_version` exists so the migration runner can
 /// always read it. Idempotent.
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 /// Forward-only migrations. Index `i` is the SQL block to apply when moving from schema
 /// version `i` to `i+1`. The bootstrap step above already created `schema_version` so
 /// migrations only carry the **schema additions** of their version.
-pub const MIGRATIONS: &[&str] = &[V1_SCHEMA];
+pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA];
 
 const V1_SCHEMA: &str = r#"
 -- linked Google Drive account (single row in MVP, id=1)
@@ -102,4 +102,21 @@ CREATE TABLE drive_change_cursor (
     page_token TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+"#;
+
+/// v2 — single-row `state_meta` for surfaceable daemon state. Today we use the
+/// `blocked_*` triple (FR-009, FR-020) and the `last_sync_*` triple (FR-008
+/// section "last_sync"). Future state can be added as new columns without
+/// breaking compat.
+const V2_SCHEMA: &str = r#"
+CREATE TABLE state_meta (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    blocked_kind     TEXT CHECK (blocked_kind IN ('auth', 'remote', 'mapping')),
+    blocked_message  TEXT,
+    blocked_at       INTEGER,
+    last_sync_at     INTEGER,
+    items_uploaded   INTEGER NOT NULL DEFAULT 0,
+    items_downloaded INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO state_meta (id) VALUES (1);
 "#;

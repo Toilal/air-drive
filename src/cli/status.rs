@@ -23,6 +23,7 @@ use crate::cli::{ExitCode, runtime};
 use crate::daemon::lock::Lock;
 use crate::error::{Error, Result};
 use crate::state::Db;
+use crate::state::meta::{self, BlockedKind};
 use crate::state::ops::Operation;
 use crate::state::{accounts, conflicts, mapping, ops};
 
@@ -59,8 +60,13 @@ pub async fn collect(db: &Db, pid: Option<u32>) -> Result<Value> {
     let op_counts = ops::count_by_op(db.connection()).await?;
     let conflict_rows = conflicts::list_unresolved(db.connection()).await?;
 
+    let blocked = meta::get_blocked(db.connection()).await?;
+    let (last_sync_at, items_uploaded, items_downloaded) = meta::last_sync(db.connection()).await?;
+
     let total_pending: i64 = op_counts.values().sum();
-    let state = if pid.is_some() && total_pending > 0 {
+    let state = if blocked.is_some() {
+        "blocked"
+    } else if pid.is_some() && total_pending > 0 {
         "syncing"
     } else if pid.is_some() {
         "idle"
@@ -121,8 +127,32 @@ pub async fn collect(db: &Db, pid: Option<u32>) -> Result<Value> {
     snapshot.insert("account".into(), account_json);
     snapshot.insert("mapping".into(), mapping_json);
     snapshot.insert("pending".into(), pending);
-    snapshot.insert("last_sync".into(), Value::Null);
-    snapshot.insert("last_error".into(), Value::Null);
+    snapshot.insert(
+        "last_sync".into(),
+        match last_sync_at {
+            Some(at) => json!({
+                "timestamp": at,
+                "items_uploaded": items_uploaded,
+                "items_downloaded": items_downloaded,
+            }),
+            None => Value::Null,
+        },
+    );
+    snapshot.insert(
+        "last_error".into(),
+        match &blocked {
+            Some(b) => json!({
+                "message": b.message,
+                "at": b.at,
+                "kind": match b.kind {
+                    BlockedKind::Auth => "auth",
+                    BlockedKind::Remote => "remote",
+                    BlockedKind::Mapping => "mapping",
+                },
+            }),
+            None => Value::Null,
+        },
+    );
     snapshot.insert("conflicts".into(), Value::Array(conflicts_json));
     snapshot.insert("pid".into(), pid.map(|p| json!(p)).unwrap_or(Value::Null));
     snapshot.insert("rclone".into(), Value::Null);
