@@ -117,6 +117,22 @@ pub async fn run(
             .await
             {
                 Ok(()) => {
+                    // T060 — bump the last_sync_at + items_uploaded /
+                    // items_downloaded counters that `air-drive status`
+                    // surfaces. Upload/RenameRemote count as uploaded;
+                    // Download as downloaded; deletes don't increment
+                    // anything (the conflict + status schema doesn't track
+                    // them separately).
+                    let (delta_up, delta_down) = match op.op {
+                        Operation::Upload | Operation::RenameRemote => (1, 0),
+                        Operation::Download => (0, 1),
+                        _ => (0, 0),
+                    };
+                    if delta_up != 0 || delta_down != 0 {
+                        meta::record_sync_cycle(db.connection(), unix_now(), delta_up, delta_down)
+                            .await
+                            .ok();
+                    }
                     ops::delete(db.connection(), op.id).await.ok();
                 }
                 Err(Error::Oauth(msg)) => {

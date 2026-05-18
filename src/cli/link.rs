@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::drive::metadata;
 use crate::error::Result;
 use crate::state::accounts;
+use crate::state::meta;
 use crate::state::unix_now;
 
 /// Run the `link` subcommand. `account_label`, when present, is logged so the user
@@ -34,6 +35,10 @@ pub async fn run(
     let about = metadata::about_user(&http).await?;
     let db = runtime::open_state(&paths).await?;
     accounts::upsert(db.connection(), &about.email, unix_now()).await?;
+    // A successful link with fresh tokens clears any prior `blocked_kind =
+    // auth` state on disk. The daemon (if running) will notice on its next
+    // 30 s poll and resume work; restart isn't required.
+    meta::clear_blocked(db.connection()).await?;
     if let Some(label) = account_label {
         tracing::warn!(
             label,

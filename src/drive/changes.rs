@@ -163,6 +163,25 @@ pub async fn run(
             let removed = c.get("removed").and_then(|v| v.as_bool()).unwrap_or(false);
             let file = c.get("file").and_then(parse_snapshot);
 
+            // FR-020 / T070b — the watched remote folder itself was deleted on
+            // Drive. The daemon can't make further progress; flip to
+            // `state_meta.blocked_kind = remote` and skip emitting this
+            // change (no sync_item references the root).
+            if removed && file_id == root_id {
+                tracing::error!(
+                    folder = %root_id,
+                    "watched remote folder was trashed — daemon is now blocked (FR-020)"
+                );
+                let _ = crate::state::meta::set_blocked(
+                    db.connection(),
+                    crate::state::meta::BlockedKind::Remote,
+                    "watched remote folder was removed from Drive",
+                    unix_now(),
+                )
+                .await;
+                continue;
+            }
+
             let relative_path = if removed {
                 // Removed events have no file resource — we trust the daemon's
                 // own state (sync_item) to know whether the id was relevant.
