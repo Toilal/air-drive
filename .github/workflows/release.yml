@@ -1,0 +1,151 @@
+name: release
+
+# Trigger only on semver-shaped tags so a stray `v0.1` or a tag like
+# `pre-flight` doesn't accidentally publish a release.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+# `gh release` upload + auto-generated release notes both need write access
+# to the contents scope of the repo.
+permissions:
+  contents: write
+
+# Don't let a re-push of the same tag race itself.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: short
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc — broadest desktop / server compatibility, dynamically
+          # linked against the host libc. Smallest binary.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            kind: gnu
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            kind: gnu
+          # musl — statically linked, runs on Alpine / older glibc / minimal
+          # containers. Larger binary, no runtime libc dep.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            kind: musl
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            kind: musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # `rusqlite` builds SQLite from C and `ring` (rustls' crypto provider)
+      # builds its assembly through cc, so the target's libc + gcc / musl-gcc
+      # must be present. On native runners the gnu path is already covered;
+      # musl needs the `musl-tools` package.
+      - name: Install musl toolchain
+        if: matrix.kind == 'musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage the release directory
+        id: stage
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="air-drive-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/air-drive" "dist/${name}/"
+          cp LICENSE NOTICE "dist/${name}/"
+          cp assets/systemd/air-drive.service "dist/${name}/"
+          # Small INSTALL.md kept inside the tarball — the README on GitHub
+          # is the canonical reference, but offline users get the gist here.
+          cat > "dist/${name}/INSTALL.md" <<EOF
+          # air-drive ${version} — ${{ matrix.target }}
+
+          1. Drop the \`air-drive\` binary on your \`\$PATH\`:
+
+                 install -m 0755 air-drive ~/.local/bin/
+
+          2. (Optional) install the systemd user unit:
+
+                 air-drive setup --install-service
+
+             This copies \`air-drive.service\` from this archive to
+             \`~/.config/systemd/user/\` and runs
+             \`systemctl --user enable --now air-drive.service\`.
+
+          3. Link the account + map a folder once:
+
+                 air-drive link
+                 air-drive map ~/Drive 'path:My Drive/Sync'
+                 air-drive status
+
+          \`rclone\` (>= 1.65) must be on \`\$PATH\`. Install via your
+          distribution's package manager (\`apt install rclone\` on
+          Debian/Ubuntu) or grab a binary from <https://rclone.org/install>.
+          EOF
+
+          # Pack + checksum. SHA-256 lives in a sibling file so users can
+          # `sha256sum -c air-drive-...tar.gz.sha256` after download.
+          ( cd dist && tar czf "${name}.tar.gz" "${name}" )
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # softprops/action-gh-release reads git history for notes
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List staged assets
+        run: ls -la dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
