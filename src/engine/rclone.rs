@@ -198,15 +198,44 @@ impl SyncEngine for RcloneEngine {
         parse_lsjson_single(&raw)
     }
 
-    async fn update(&self, _remote_id: &str, _local: &Path) -> Result<RemoteFile> {
-        // rclone's `copyto airdrive:<existing-name>` overwrites in place — same
-        // command as upload, but we'd need to know the file's name + parent to
-        // hand to rclone. The daemon caller has that context; threading it here
-        // is left as a follow-up (the integration suite uses HttpEngine).
-        Err(Error::Rclone {
-            stderr: "RcloneEngine::update not yet wired (use AIR_DRIVE_TEST_ENGINE=http for tests)"
-                .into(),
-        })
+    async fn update(&self, remote_id: &str, local: &Path) -> Result<RemoteFile> {
+        // Same dance as `download`: look up name + parent via a cheap
+        // files.get call, then let rclone address the file by path (the only
+        // form its Drive backend accepts) and overwrite in place via copyto.
+        let meta =
+            crate::drive::metadata::get_file_raw(&self.http, remote_id, "id,name,parents").await?;
+        let name = meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Drive(format!("file {remote_id} has no `name`")))?
+            .to_owned();
+        let parent_id = meta
+            .get("parents")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| Error::Drive(format!("file {remote_id} has no `parents`")))?
+            .to_owned();
+
+        let mut cmd = self.base_command().await?;
+        cmd.arg("copyto")
+            .arg(local)
+            .arg(format!("{REMOTE_NAME}:{name}"))
+            .arg("--drive-root-folder-id")
+            .arg(&parent_id);
+        self.run(cmd).await?;
+
+        // Re-fetch size + md5 from rclone so the caller can refresh the cached
+        // fingerprint without an extra Drive API round-trip.
+        let mut probe = self.base_command().await?;
+        probe
+            .arg("lsjson")
+            .arg("--hash")
+            .arg(format!("{REMOTE_NAME}:{name}"))
+            .arg("--drive-root-folder-id")
+            .arg(&parent_id);
+        let raw = self.run(probe).await?;
+        parse_lsjson_single(&raw)
     }
 
     async fn download(&self, remote_id: &str, local: &Path, local_root: &Path) -> Result<()> {
