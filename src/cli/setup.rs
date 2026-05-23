@@ -241,9 +241,7 @@ fn uninstall_systemd_unit(config_dir_override: Option<&Path>) -> Result<ExitCode
 /// shebang's interpreter missing on `$PATH`) and would mask real errors.
 fn is_unit_not_loaded(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
-    s.contains("could not be found")
-        || s.contains("not loaded")
-        || s.contains("does not exist")
+    s.contains("could not be found") || s.contains("not loaded") || s.contains("does not exist")
 }
 
 /// Where the unit lands on disk. Exposed for tests + diagnostics.

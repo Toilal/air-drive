@@ -28,7 +28,7 @@ fn run(mut cmd: Command) -> (i32, String, String) {
 
 fn load_schema() -> Validator {
     let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("specs/001-minimal-sync-daemon/contracts/status.schema.json");
+        .join("tests/integration/fixtures/status.schema.json");
     let raw = std::fs::read_to_string(&schema_path).unwrap_or_else(|e| {
         panic!("read {}: {e}", schema_path.display());
     });

@@ -109,8 +109,8 @@ dotenvy = "0.15"
 jsonschema = "0.28"
 
 # Integration tests live under tests/integration/ rather than at the default
-# tests/ root so the layout mirrors the spec (specs/001-minimal-sync-daemon/tasks.md).
-# Each subfolder is one Cargo "test" target sharing the common harness via `mod common`.
+# tests/ root, with one Cargo "test" target per file. They share a `mod common`
+# harness that owns the wiremock-backed Drive API and the FsFixture tempdir.
 [[test]]
 name = "initial_sync"
 path = "tests/integration/initial_sync.rs"

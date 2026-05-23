@@ -17,26 +17,19 @@ desktop UI via Tauri.
 
 ## Status
 
-🚧 **MVP feature complete on the `001-minimal-sync-daemon` branch.** All six phases of
-the spec are landed and tested end-to-end against a real Drive account + rclone:
-
-- [`specs/001-minimal-sync-daemon/spec.md`](./specs/001-minimal-sync-daemon/spec.md) —
-  the user stories, functional requirements, and clarification record.
-- [`specs/001-minimal-sync-daemon/plan.md`](./specs/001-minimal-sync-daemon/plan.md) —
-  technical context, module map, constitution check.
-- [`specs/001-minimal-sync-daemon/quickstart.md`](./specs/001-minimal-sync-daemon/quickstart.md)
-  — getting started from a fresh checkout.
-- [`tests/e2e/README.md`](./tests/e2e/README.md) — how to set up a Google account for
-  the live-Drive integration suite.
+🚧 **MVP shipped.** Bidirectional event-driven sync, single Drive account, one
+mapped folder pair, integration-tested against a mocked Drive API and end-to-end
+against a real Drive account + rclone. See
+[`tests/e2e/README.md`](./tests/e2e/README.md) for how to set up a Google account
+for the live-Drive integration suite.
 
 Tests: 111 unit + ~30 integration (mocked) + 3 e2e (real Drive). `cargo clippy
 --all-targets --all-features -- -D warnings` clean. CI runs the mocked suite on every
 push (`.github/workflows/ci.yml`); the real-Drive suite triggers on `main` + manual
 dispatch (`.github/workflows/e2e.yml`).
 
-See [`.specify/memory/constitution.md`](./.specify/memory/constitution.md) for the
-project's principles, technology stack, and quality gates — this remains the source of
-truth and any change goes through the constitution flow.
+See [`CLAUDE.md`](./CLAUDE.md) for the project's principles, technology stack, and
+quality gates.
 
 ## Install (Linux, systemd)
 
