@@ -60,7 +60,10 @@ pub async fn run(
 
     // Step 1 — create the project.
     writeln!(stdout, "[1/5] Create a Google Cloud project")?;
-    open_or_print(&mut stdout, "https://console.cloud.google.com/projectcreate")?;
+    open_or_print(
+        &mut stdout,
+        "https://console.cloud.google.com/projectcreate",
+    )?;
     let project_id = prompt(&mut stdin, &mut stdout, "      Project ID once created: ")?;
     validate_project_id(&project_id)?;
 
@@ -79,9 +82,11 @@ pub async fn run(
 
     // Step 3a — consent screen "Branding" (Auth Platform setup wizard).
     writeln!(stdout)?;
-    writeln!(stdout, "[3/5] Configure the Auth Platform (consent + audience)")?;
-    let url =
-        format!("https://console.cloud.google.com/auth/overview/create?project={project_id}");
+    writeln!(
+        stdout,
+        "[3/5] Configure the Auth Platform (consent + audience)"
+    )?;
+    let url = format!("https://console.cloud.google.com/auth/overview/create?project={project_id}");
     open_or_print(&mut stdout, &url)?;
     writeln!(stdout, "      a. Branding (the form on this page):")?;
     writeln!(stdout, "         - App name: air-drive (or anything)")?;
@@ -90,22 +95,22 @@ pub async fn run(
     writeln!(stdout, "         - Contact info: your Google email")?;
     writeln!(stdout, "         - Click CREATE.")?;
     writeln!(stdout)?;
-    writeln!(stdout, "      b. Then open the Audience tab (left menu) and")?;
+    writeln!(
+        stdout,
+        "      b. Then open the Audience tab (left menu) and"
+    )?;
     writeln!(
         stdout,
         "         add your Google account email under 'Test users'."
     )?;
-    let url =
-        format!("https://console.cloud.google.com/auth/audience?project={project_id}");
+    let url = format!("https://console.cloud.google.com/auth/audience?project={project_id}");
     open_or_print(&mut stdout, &url)?;
     let _ = prompt(&mut stdin, &mut stdout, "      Press Enter when done: ")?;
 
     // Step 4 — OAuth Desktop client (new Auth Platform location).
     writeln!(stdout)?;
     writeln!(stdout, "[4/5] Create the OAuth client credentials")?;
-    let url = format!(
-        "https://console.cloud.google.com/auth/clients/create?project={project_id}"
-    );
+    let url = format!("https://console.cloud.google.com/auth/clients/create?project={project_id}");
     open_or_print(&mut stdout, &url)?;
     writeln!(stdout, "      - Application type: Desktop app")?;
     writeln!(stdout, "      - Name: air-drive (or anything)")?;
@@ -122,9 +127,8 @@ pub async fn run(
         stdout,
         "      click the client name (or open the URL below) to reveal it."
     )?;
-    let url = format!(
-        "https://console.cloud.google.com/auth/clients/{client_id}?project={project_id}"
-    );
+    let url =
+        format!("https://console.cloud.google.com/auth/clients/{client_id}?project={project_id}");
     open_or_print(&mut stdout, &url)?;
     let client_secret = prompt(&mut stdin, &mut stdout, "      Paste the Client secret: ")?;
     validate_client_secret(&client_secret)?;
@@ -154,7 +158,10 @@ pub async fn run(
         return crate::cli::link::run(config_dir_override, &cfg, None).await;
     }
 
-    writeln!(stdout, "Next: run `air-drive link` to authorize the account.")?;
+    writeln!(
+        stdout,
+        "Next: run `air-drive link` to authorize the account."
+    )?;
     Ok(ExitCode::Ok)
 }
 
@@ -241,9 +248,7 @@ mod tests {
 
     #[test]
     fn client_id_validator_accepts_typical() {
-        assert!(
-            validate_client_id("123-abc.apps.googleusercontent.com").is_ok()
-        );
+        assert!(validate_client_id("123-abc.apps.googleusercontent.com").is_ok());
     }
 
     #[test]

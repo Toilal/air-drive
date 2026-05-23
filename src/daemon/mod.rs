@@ -81,8 +81,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
 
     // 1. Local watcher (notify) → raw events channel.
     let ignore_matcher = Arc::new(watch::build_ignore_matcher(&ctx.watch_ignore_patterns)?);
-    let (_watcher_keepalive, watcher_rx) =
-        watch::Watcher::start(&ctx.local_root, ignore_matcher)?;
+    let (_watcher_keepalive, watcher_rx) = watch::Watcher::start(&ctx.local_root, ignore_matcher)?;
     let raw_forwarder = forward_channel(watcher_rx, raw_tx, cancel.clone());
 
     // 2. Debounce.

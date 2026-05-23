@@ -98,11 +98,21 @@ pub enum Command {
         yes: bool,
     },
     /// Interactive first-time setup: link → map → start --initial-sync.
+    ///
+    /// `--install-service` and `--uninstall-service` manage the systemd user
+    /// unit and are mutually exclusive.
     Setup {
         /// Install the systemd user unit at
         /// `~/.config/systemd/user/air-drive.service` and enable it (FR-014).
         #[arg(long)]
         install_service: bool,
+        /// Reverse `--install-service`: stop and disable the systemd user
+        /// unit, remove `~/.config/systemd/user/air-drive.service`, and
+        /// refresh the systemd user-scope cache. Idempotent — exits 0 even
+        /// when there is nothing to remove. Leaves config, state, tokens,
+        /// account, mapping, watched folder, and binary untouched.
+        #[arg(long, conflicts_with = "install_service")]
+        uninstall_service: bool,
     },
     /// Bootstrap a personal Google Cloud OAuth client (Desktop) via the GCP
     /// Console, then write `[oauth]` into `config.toml`. Required when the
@@ -176,8 +186,16 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Resume => resume::run(cli.config_dir.as_deref()).await,
         Command::Status { json } => status::run(cli.config_dir.as_deref(), json).await,
         Command::Unlink { yes } => unlink::run(cli.config_dir.as_deref(), yes).await,
-        Command::Setup { install_service } => {
-            setup::run(cli.config_dir.as_deref(), install_service).await
+        Command::Setup {
+            install_service,
+            uninstall_service,
+        } => {
+            setup::run(
+                cli.config_dir.as_deref(),
+                install_service,
+                uninstall_service,
+            )
+            .await
         }
         Command::Init { force, link } => init::run(cli.config_dir.as_deref(), force, link).await,
     }

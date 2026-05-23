@@ -41,7 +41,7 @@ gates (cargo fmt, clippy `-D warnings`, tests) MUST pass before merging any MR.
 ## Active feature
 
 <!-- SPECKIT START -->
-Current implementation plan: [`specs/001-minimal-sync-daemon/plan.md`](./specs/001-minimal-sync-daemon/plan.md).
+Current implementation plan: [`specs/002-uninstall-service-flag/plan.md`](./specs/002-uninstall-service-flag/plan.md).
 For technical context, dependencies, project structure, and constitution check status, read
 that plan first.
 <!-- SPECKIT END -->
