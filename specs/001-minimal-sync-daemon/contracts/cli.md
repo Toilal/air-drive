@@ -111,12 +111,13 @@ Exit codes: `0` on success, `8` if a daemon is currently running against this co
 Interactive wrapper: runs `link`, prompts for the local and remote folders, runs `map`, then `start --initial-sync`. Intended for first-time use.
 
 ```text
-USAGE: air-drive setup [--install-service]
+USAGE: air-drive setup [--install-service | --uninstall-service]
 ```
 
 | Flag | Description |
 |---|---|
 | `--install-service` | After successful setup, install the systemd user unit `~/.config/systemd/user/air-drive.service` and enable it for the current user. |
+| `--uninstall-service` | Reverse `--install-service`: stop and disable the user-scope `air-drive.service` unit, remove the unit file from `~/.config/systemd/user/`, and refresh the systemd cache. Idempotent — exits 0 even when there is nothing to remove. Gracefully skips the systemd interactions on hosts where `systemctl` is unavailable, still removing the unit file if present. Does NOT touch the daemon's config, state, OAuth tokens, linked account, folder mapping, watched local folder, or the binary itself. Mutually exclusive with `--install-service`. |
 
 Exit codes: forwards the first non-zero exit code from the underlying commands.
 

@@ -237,7 +237,10 @@ mod tests {
         let path = tmp.path().join("config.toml");
         Config::default().save(&path).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("[watch]"), "config.toml lacks [watch]: {body}");
+        assert!(
+            body.contains("[watch]"),
+            "config.toml lacks [watch]: {body}"
+        );
         assert!(
             body.contains("ignore_patterns"),
             "config.toml lacks ignore_patterns: {body}"
