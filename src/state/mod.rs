@@ -231,7 +231,7 @@ mod tests {
         use crate::state::{accounts, conflicts, cursor, items, mapping, ops};
         let (_tmp, db) = open_temp().await;
         let account_id = accounts::upsert(db.connection(), "a@x", 1).await.unwrap();
-        let mapping_id = mapping::upsert(db.connection(), account_id, "/l", "rid", None, 1)
+        let mapping_id = mapping::upsert(db.connection(), account_id, "/l", "rid", None, None, 1)
             .await
             .unwrap();
         let item_id = items::insert(

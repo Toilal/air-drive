@@ -43,14 +43,15 @@ pub async fn run(
         }
     };
     // 2. Resolve the remote folder spec. A `Mapping` error means "no such
-    //    folder" — when the spec uses `path:` notation and the user (via
-    //    config or an interactive prompt) authorises it, retry with auto-create
-    //    enabled. Any other error path is non-recoverable here → exit 5.
+    //    folder" — for any non-URL spec (everything is a path now), retry with
+    //    auto-create enabled after authorisation (config or interactive
+    //    prompt). URL specs reference a specific existing resource and cannot
+    //    be recreated. Any other error path is non-recoverable → exit 5.
     let cfg_auto = cfg.mapping.auto_create_remote_root;
-    let is_path_notation = remote_folder.trim_start().starts_with("path:");
+    let is_path_spec = !metadata::is_drive_url(&remote_folder);
     let remote_id = match metadata::resolve_path(&http, &remote_folder, cfg_auto).await {
         Ok(id) => id,
-        Err(Error::Mapping(msg)) if !cfg_auto && is_path_notation => {
+        Err(Error::Mapping(msg)) if !cfg_auto && is_path_spec => {
             let create = interactive::confirm(&format!(
                 "remote folder for `{remote_folder}` does not exist on Drive — create it?"
             ))?;
@@ -85,6 +86,7 @@ pub async fn run(
         canonical.to_string_lossy().as_ref(),
         &remote_id,
         remote_name.as_deref(),
+        Some(remote_folder.trim()),
     )
     .await?;
     tracing::info!(
@@ -141,6 +143,7 @@ async fn persist_mapping(
     local_path: &str,
     remote_folder_id: &str,
     remote_folder_name: Option<&str>,
+    remote_folder_spec: Option<&str>,
 ) -> Result<()> {
     mapping::upsert(
         db.connection(),
@@ -148,6 +151,7 @@ async fn persist_mapping(
         local_path,
         remote_folder_id,
         remote_folder_name,
+        remote_folder_spec,
         unix_now(),
     )
     .await?;

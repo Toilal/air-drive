@@ -13,7 +13,7 @@
 //! `specs/001-minimal-sync-daemon/data-model.md`.
 
 /// Latest schema version this binary knows how to apply.
-pub const LATEST_VERSION: i64 = 2;
+pub const LATEST_VERSION: i64 = 3;
 
 /// Unconditional bootstrap: ensures `schema_version` exists so the migration runner can
 /// always read it. Idempotent.
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 /// Forward-only migrations. Index `i` is the SQL block to apply when moving from schema
 /// version `i` to `i+1`. The bootstrap step above already created `schema_version` so
 /// migrations only carry the **schema additions** of their version.
-pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA];
+pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA, V3_SCHEMA];
 
 const V1_SCHEMA: &str = r#"
 -- linked Google Drive account (single row in MVP, id=1)
@@ -118,4 +118,13 @@ CREATE TABLE state_meta (
     items_downloaded INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO state_meta (id) VALUES (1);
+"#;
+
+/// v3 — persist the original `<remote-folder>` CLI spec on the mapping row.
+/// The daemon needs it at startup to re-resolve (and optionally recreate) the
+/// remote root if the user trashed it on Drive between two runs. Without the
+/// spec, the stored Drive ID becomes useless for recreation since we cannot
+/// guess the parent + name from an ID alone.
+const V3_SCHEMA: &str = r#"
+ALTER TABLE folder_mapping ADD COLUMN remote_folder_spec TEXT;
 "#;

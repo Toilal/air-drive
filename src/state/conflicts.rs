@@ -99,7 +99,7 @@ mod tests {
             .await
             .unwrap();
         let mapping_id =
-            mapping::upsert(db.connection(), account_id, "/home/alice", "rid", None, 1)
+            mapping::upsert(db.connection(), account_id, "/home/alice", "rid", None, None, 1)
                 .await
                 .unwrap();
         let item_id = items::insert(

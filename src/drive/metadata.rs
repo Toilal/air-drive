@@ -184,34 +184,28 @@ pub async fn create_folder(http: &DriveHttp, parent_id: &str, name: &str) -> Res
 
 /// Resolve the `<remote-folder>` argument of `air-drive map`:
 ///
-/// - bare ID like `0AIQ...` or `1aBcDef-` → returned as-is after a `files.get` check
-/// - URL like `https://drive.google.com/drive/folders/<id>` → ID extracted then verified
-/// - `path:My Drive/Sync` notation → walked segment by segment from `My Drive` root
+/// - URL like `https://drive.google.com/drive/folders/<id>` → ID extracted
+///   then verified via `files.get`. The URL references a specific existing
+///   resource — `auto_create` is irrelevant here.
+/// - Anything else (with or without the optional `path:` prefix) is parsed as
+///   a path under My Drive root and walked segment by segment. `auto_create`
+///   controls whether missing segments are created on the fly. A bare folder
+///   name is equivalent to `path:<name>`.
 ///
 /// The resolved file MUST be a folder, otherwise an [`Error::Mapping`] is returned.
-///
-/// When `auto_create` is `true`, missing segments under `path:` notation are
-/// created on the fly; ID and URL forms ignore the flag (they reference a
-/// specific existing resource).
 pub async fn resolve_path(http: &DriveHttp, spec: &str, auto_create: bool) -> Result<String> {
     let trimmed = spec.trim();
 
-    // `path:` notation.
-    if let Some(p) = trimmed.strip_prefix("path:") {
-        return resolve_path_notation(http, p, auto_create).await;
-    }
-
-    // Drive URL.
+    // Drive URL — identifies a specific existing resource.
     if let Some(id) = extract_id_from_url(trimmed) {
         let meta = get_file(http, &id).await?;
         ensure_folder(&meta)?;
         return Ok(meta.id);
     }
 
-    // Bare ID.
-    let meta = get_file(http, trimmed).await?;
-    ensure_folder(&meta)?;
-    Ok(meta.id)
+    // Everything else is a path. Strip the optional `path:` prefix.
+    let path = trimmed.strip_prefix("path:").unwrap_or(trimmed);
+    resolve_path_notation(http, path, auto_create).await
 }
 
 fn ensure_folder(meta: &DriveFileMeta) -> Result<()> {
@@ -275,8 +269,16 @@ async fn resolve_path_notation(
     Ok(current)
 }
 
+/// `true` when `s` is parseable as a Drive URL (the input would be handled by
+/// the URL branch of [`resolve_path`]). Used by callers that need to
+/// distinguish a recoverable path-style spec from a URL referring to a
+/// specific, non-recreatable resource.
+pub fn is_drive_url(s: &str) -> bool {
+    extract_id_from_url(s.trim()).is_some()
+}
+
 /// Pull the file/folder ID out of a `https://drive.google.com/...` URL. Returns `None`
-/// for non-URL inputs so the caller falls back to "treat as bare ID".
+/// for non-URL inputs so the caller falls back to "treat as path".
 fn extract_id_from_url(s: &str) -> Option<String> {
     if !(s.starts_with("http://") || s.starts_with("https://")) {
         return None;

@@ -14,10 +14,13 @@ use crate::cli::interactive;
 use crate::cli::{ExitCode, runtime};
 use crate::config::Config;
 use crate::daemon::{DaemonContext, lock::Lock};
+use crate::drive::http::DriveHttp;
+use crate::drive::metadata;
 use crate::error::{Error, Result};
 use crate::reconcile;
 use crate::state::cursor;
-use crate::state::{accounts, mapping};
+use crate::state::mapping::FolderMapping;
+use crate::state::{Db, accounts, mapping};
 
 /// Run the `start` subcommand. Honours the `--initial-sync` flag and the
 /// `--remote-poll-interval` override.
@@ -73,6 +76,12 @@ pub async fn run(
     // surface as a raw `notify watch(...): No such file or directory` error;
     // honour `watch.auto_create_root` instead.
     ensure_local_root(&local_root, cfg.watch.auto_create_root)?;
+    // Remote-side counterpart: probe that `remote_folder_id` still resolves to
+    // a live (non-trashed) folder. If it was trashed between two daemon runs
+    // and the user originally pointed `map` at a `path:` notation target, we
+    // can recreate it (gated by `mapping.auto_create_remote_root` or an
+    // interactive confirmation) and persist the refreshed Drive ID.
+    let remote_root_id = ensure_remote_root(&db, &http, cfg, &mapping_row).await?;
     let engine = runtime::build_engine(
         cfg,
         &paths,
@@ -94,7 +103,7 @@ pub async fn run(
             &db,
             mapping_row.id,
             &local_root,
-            &mapping_row.remote_folder_id,
+            &remote_root_id,
         )
         .await?;
     }
@@ -130,7 +139,7 @@ pub async fn run(
         http,
         mapping_id: mapping_row.id,
         local_root,
-        remote_root_id: mapping_row.remote_folder_id.clone(),
+        remote_root_id,
         remote_poll_interval: Duration::from_secs(poll_interval),
         runtime_dir: paths.runtime().to_path_buf(),
         watch_ignore_patterns: cfg.watch.ignore_patterns.clone(),
@@ -192,6 +201,103 @@ fn ensure_local_root(path: &Path, auto_create: bool) -> Result<()> {
             path.display()
         ))),
     }
+}
+
+/// Verify the remote root recorded in `folder_mapping` still resolves to a
+/// live, non-trashed folder on Drive. If it doesn't and the original `<remote-
+/// folder>` argument was `path:` notation, re-resolve the spec (creating
+/// missing segments when authorised) and persist the refreshed Drive ID.
+///
+/// - If `remote_folder_id` resolves to a live folder: returns the stored id.
+/// - If it 404s or comes back trashed AND `remote_folder_spec` uses `path:`:
+///   gated by `mapping.auto_create_remote_root` (silent) or an interactive
+///   prompt; on confirmation re-runs `resolve_path` with auto-create, updates
+///   the DB, returns the new id.
+/// - Otherwise (no spec / bare ID / URL spec / declined / non-interactive
+///   stdin): actionable error pointing at `air-drive map` or the config flag.
+async fn ensure_remote_root(
+    db: &Db,
+    http: &DriveHttp,
+    cfg: &Config,
+    mapping_row: &FolderMapping,
+) -> Result<String> {
+    let stored_id = mapping_row.remote_folder_id.as_str();
+    match metadata::get_file_raw(http, stored_id, "id,mimeType,trashed").await {
+        Ok(v) => {
+            let trashed = v
+                .get("trashed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if !trashed {
+                return Ok(stored_id.to_owned());
+            }
+            tracing::warn!(
+                folder_id = %stored_id,
+                "remote root is in the trash"
+            );
+        }
+        Err(Error::Drive(msg)) if msg.starts_with("HTTP 404") => {
+            tracing::warn!(
+                folder_id = %stored_id,
+                "remote root no longer exists on Drive"
+            );
+        }
+        Err(e) => {
+            // Transient errors (OAuth refresh failure, network, 5xx) are not
+            // ours to resolve at pre-flight time — the daemon's continuous
+            // loop handles them by flipping `state_meta.blocked_kind`. Trust
+            // the stored ID and let the loop surface the real problem.
+            tracing::warn!(
+                folder_id = %stored_id,
+                error = %e,
+                "could not probe remote root at startup — deferring to daemon loop"
+            );
+            return Ok(stored_id.to_owned());
+        }
+    }
+
+    // Below: the stored ID points at a missing or trashed folder. Try to
+    // recover via the original `path:` spec, if we have one and it's path:.
+    let Some(spec) = mapping_row.remote_folder_spec.as_deref() else {
+        return Err(Error::Mapping(format!(
+            "remote folder `{stored_id}` is missing or trashed and the original \
+             mapping spec was not recorded. Run `air-drive map <local> <remote>` \
+             to point the daemon at a fresh folder."
+        )));
+    };
+    let trimmed_spec = spec.trim();
+    if metadata::is_drive_url(trimmed_spec) {
+        return Err(Error::Mapping(format!(
+            "remote folder `{stored_id}` (URL spec `{trimmed_spec}`) is missing or trashed. \
+             URLs reference a specific resource that cannot be recreated — run \
+             `air-drive map <local> <name>` to point the daemon at a fresh folder."
+        )));
+    }
+
+    let allow_create = if cfg.mapping.auto_create_remote_root {
+        true
+    } else {
+        interactive::confirm(&format!(
+            "remote folder for `{trimmed_spec}` is missing on Drive — recreate it?"
+        ))?
+    };
+    if !allow_create {
+        return Err(Error::Mapping(format!(
+            "remote folder `{stored_id}` (spec `{trimmed_spec}`) is missing or trashed. \
+             Re-run interactively to confirm, set `mapping.auto_create_remote_root = true` \
+             in config.toml, or run `air-drive map` again."
+        )));
+    }
+
+    let new_id = metadata::resolve_path(http, trimmed_spec, true).await?;
+    mapping::update_remote_folder_id(db.connection(), &new_id).await?;
+    tracing::info!(
+        spec = %trimmed_spec,
+        old_id = %stored_id,
+        new_id = %new_id,
+        "recreated remote root and refreshed mapping"
+    );
+    Ok(new_id)
 }
 
 #[cfg(test)]

@@ -66,8 +66,12 @@ async fn us1_2_map_persists_mapping() {
     // `map` needs an account row to attach the mapping to.
     seed_account(&fx, "alice@example.com");
 
+    // Pass the folder by URL — non-URL specs are now treated as `path:`
+    // notation, so a bare ID like the mocked `root_id` would be looked up as
+    // a folder *name* under root, not as a Drive ID.
+    let url = format!("https://drive.google.com/drive/folders/{root_id}");
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("map").arg(&fx.local_dir).arg(&root_id);
+    cmd.arg("map").arg(&fx.local_dir).arg(&url);
     let (code, _stdout, stderr) = run(cmd);
 
     assert_eq!(code, 0, "`map` should succeed; stderr=\n{stderr}");
