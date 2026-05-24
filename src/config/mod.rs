@@ -99,6 +99,12 @@ pub struct WatchConfig {
     /// Glob patterns matched against the file name. Default list seeded by
     /// [`WatchConfig::default`].
     pub ignore_patterns: Vec<String>,
+    /// When `true` (default), the daemon creates `mapping.local_path` on
+    /// startup if it doesn't exist yet — including any intermediate parents.
+    /// When `false`, the daemon refuses to start with an actionable error,
+    /// leaving the user in charge of creating the folder. The CLI's pre-flight
+    /// (`cli::start::ensure_local_root`) lives there.
+    pub auto_create_root: bool,
 }
 
 impl Default for WatchConfig {
@@ -108,6 +114,7 @@ impl Default for WatchConfig {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            auto_create_root: true,
         }
     }
 }

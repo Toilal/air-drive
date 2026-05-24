@@ -133,21 +133,19 @@ pub async fn run(
     let client_secret = prompt(&mut stdin, &mut stdout, "      Paste the Client secret: ")?;
     validate_client_secret(&client_secret)?;
 
-    // Step 5 — write config.toml. We deliberately persist the defaulted
-    // `[watch].ignore_patterns` list too: TOML round-trip with `Default`
-    // would otherwise drop it, leaving the user unaware of what's filtered.
-    // Once on disk the user can edit / extend the patterns directly.
+    // Step 5 — write config.toml. We only persist what the user just typed
+    // in (the [oauth] credentials). Every other section is left to the
+    // migration step below, which fills the schema with default values *and*
+    // a leading `# description` line per field — that's how the user
+    // discovers options like `watch.auto_create_root` without reading the
+    // changelog. Re-running with `--force` preserves any existing comments
+    // and user overrides because we drive a format-preserving `toml_edit`
+    // document instead of re-rendering through serde.
     writeln!(stdout)?;
     writeln!(stdout, "[5/5] Writing {}", config_path.display())?;
-    let mut cfg = existing.unwrap_or_default();
-    cfg.oauth.client_id = Some(client_id);
-    cfg.oauth.client_secret = Some(client_secret);
-    // Ensure the watch section is materialised (Default already populates it,
-    // but a previously-loaded config may have had it stripped).
-    if cfg.watch.ignore_patterns.is_empty() {
-        cfg.watch = Default::default();
-    }
-    cfg.save(&config_path)?;
+    write_oauth_seed(&config_path, &client_id, &client_secret)?;
+    crate::config::migrate::migrate_on_disk(&config_path)?;
+    let cfg = Config::load(&config_path)?;
     writeln!(stdout, "      ✓ done")?;
     writeln!(stdout)?;
 
@@ -163,6 +161,47 @@ pub async fn run(
         "Next: run `air-drive link` to authorize the account."
     )?;
     Ok(ExitCode::Ok)
+}
+
+/// Write (or update) the `[oauth]` section of `config.toml`, preserving every
+/// other section verbatim. If the file does not exist yet we create an empty
+/// `toml_edit` document; if it does, we parse it and surgically set the two
+/// keys. The rest of the schema is left to [`crate::config::migrate`] to
+/// materialise with descriptive comments on the very next read.
+fn write_oauth_seed(path: &Path, client_id: &str, client_secret: &str) -> Result<()> {
+    use toml_edit::{DocumentMut, Item, Table, value};
+
+    let mut doc: DocumentMut = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .parse()
+            .map_err(|e: toml_edit::TomlError| Error::Toml(e.to_string()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    if !doc.contains_table("oauth") {
+        let mut t = Table::new();
+        t.set_implicit(false);
+        doc.insert("oauth", Item::Table(t));
+    }
+    let oauth = doc
+        .get_mut("oauth")
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| {
+            Error::Config("config.toml has a non-table [oauth] entry; refusing to edit".into())
+        })?;
+    oauth["client_id"] = value(client_id);
+    oauth["client_secret"] = value(client_secret);
+
+    std::fs::write(path, doc.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)?.permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
 }
 
 /// Open a URL in the default browser; fall back to just printing it if the

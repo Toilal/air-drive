@@ -67,6 +67,11 @@ pub async fn run(
     let token = runtime::build_token_provider(cfg, &paths).await?;
     let http = runtime::build_drive_http(token.clone())?;
     let local_root = std::path::PathBuf::from(&mapping_row.local_path);
+    // Pre-flight: the watcher will inotify-subscribe to `local_root` shortly,
+    // and the engine + reconciler will write into it. A missing folder used to
+    // surface as a raw `notify watch(...): No such file or directory` error;
+    // honour `watch.auto_create_root` instead.
+    ensure_local_root(&local_root, cfg.watch.auto_create_root)?;
     let engine = runtime::build_engine(
         cfg,
         &paths,
@@ -134,4 +139,92 @@ pub async fn run(
     crate::daemon::run(ctx, cancel).await?;
 
     Ok(ExitCode::Ok)
+}
+
+/// Ensure the watched folder exists before the daemon attaches the inotify
+/// watcher or the engine writes into it.
+///
+/// - If `path` is an existing directory: succeed.
+/// - If `path` exists but is not a directory: actionable error.
+/// - If `path` is missing and `auto_create` is `true`: create the directory
+///   (and any missing parents), log at `tracing::info`, succeed.
+/// - If `path` is missing and `auto_create` is `false`: actionable error
+///   pointing the user at the `watch.auto_create_root` toggle.
+fn ensure_local_root(path: &Path, auto_create: bool) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(Error::Mapping(format!(
+            "watched folder `{}` exists but is not a directory; \
+             remove the file or pick a different `local_path` via `air-drive map`",
+            path.display()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if auto_create {
+                std::fs::create_dir_all(path).map_err(|io| {
+                    Error::Mapping(format!(
+                        "watched folder `{}` does not exist and could not be created: {io}",
+                        path.display()
+                    ))
+                })?;
+                tracing::info!(path = %path.display(), "created watched folder");
+                Ok(())
+            } else {
+                Err(Error::Mapping(format!(
+                    "watched folder `{}` does not exist. \
+                     Create it manually or set `watch.auto_create_root = true` in config.toml.",
+                    path.display()
+                )))
+            }
+        }
+        Err(e) => Err(Error::Mapping(format!(
+            "cannot inspect watched folder `{}`: {e}",
+            path.display()
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_root_succeeds_when_dir_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_local_root(tmp.path(), false).expect("existing dir should succeed");
+        ensure_local_root(tmp.path(), true).expect("existing dir should succeed");
+    }
+
+    #[test]
+    fn ensure_root_creates_when_missing_and_auto_create_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("nested/child");
+        assert!(!target.exists());
+        ensure_local_root(&target, true).expect("should create the folder");
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn ensure_root_errors_actionably_when_missing_and_auto_create_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("missing");
+        let err = ensure_local_root(&target, false).expect_err("should refuse");
+        let msg = err.to_string();
+        // Actionable: mentions the path and the config toggle, hides inotify wording.
+        assert!(msg.contains(&target.display().to_string()), "msg: {msg}");
+        assert!(msg.contains("watch.auto_create_root"), "msg: {msg}");
+        assert!(
+            !msg.contains("notify watch"),
+            "raw watcher wording leaked: {msg}"
+        );
+        assert!(!msg.contains("os error"), "raw os error leaked: {msg}");
+    }
+
+    #[test]
+    fn ensure_root_rejects_existing_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a-file-not-a-dir");
+        std::fs::write(&file, "not a dir").unwrap();
+        let err = ensure_local_root(&file, true).expect_err("file is not a dir");
+        assert!(err.to_string().contains("not a directory"));
+    }
 }

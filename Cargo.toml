@@ -141,6 +141,10 @@ path = "tests/integration/relink.rs"
 name = "setup_uninstall_service"
 path = "tests/integration/setup_uninstall_service.rs"
 
+[[test]]
+name = "missing_local_root"
+path = "tests/integration/missing_local_root.rs"
+
 # End-to-end suite that hits the real Google Drive API + the real rclone binary.
 # Every test is `#[ignore]`d so the default `cargo test` skips them; CI runs them
 # via `cargo test --test rclone_drive -- --ignored` from a dedicated workflow with

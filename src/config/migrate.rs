@@ -54,6 +54,11 @@ const FIELD_DESCRIPTIONS: &[(&str, &str, &str)] = &[
         "Glob patterns matched against the file name. Files whose name matches any pattern are never synced.",
     ),
     (
+        "watch",
+        "auto_create_root",
+        "When true, the daemon creates the watched folder on startup if it doesn't exist. When false, startup fails with an actionable error.",
+    ),
+    (
         "oauth",
         "client_id",
         "Override the embedded OAuth client_id with your own Google Cloud Desktop client.",
