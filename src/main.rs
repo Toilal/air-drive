@@ -29,7 +29,7 @@ fn main() -> StdExitCode {
         if let Ok(rt) = rt {
             rt.block_on(print_version());
         } else {
-            println!("air-drive {}", env!("CARGO_PKG_VERSION"));
+            println!("air-drive {}", air_drive::VERSION);
         }
         return StdExitCode::SUCCESS;
     }
@@ -69,7 +69,7 @@ fn main() -> StdExitCode {
 /// (with auto-download disabled — `--version` mustn't trigger a multi-MB
 /// download as a side effect).
 async fn print_version() {
-    println!("air-drive {}", env!("CARGO_PKG_VERSION"));
+    println!("air-drive {}", air_drive::VERSION);
     // Best-effort: read config if available, otherwise probe defaults.
     let (rclone_cfg, cache_dir) = match air_drive::config::paths::Paths::discover(None) {
         Ok(paths) => {
