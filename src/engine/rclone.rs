@@ -9,7 +9,7 @@
 //! | `RCLONE_CONFIG_AIRDRIVE_TYPE`        | `drive`                              |
 //! | `RCLONE_CONFIG_AIRDRIVE_TOKEN`       | `{"access_token":"<bearer>",…}`      |
 //! | `RCLONE_CONFIG_AIRDRIVE_CLIENT_ID`   | optional override from `[oauth]`     |
-//! | `RCLONE_CONFIG_AIRDRIVE_SCOPE`       | `drive.file`                         |
+//! | `RCLONE_CONFIG_AIRDRIVE_SCOPE`       | `drive`                              |
 //!
 //! Subcommands:
 //!
@@ -133,7 +133,7 @@ impl RcloneEngine {
         let mut cmd = Command::new(&self.binary.path);
         cmd.env("RCLONE_CONFIG_AIRDRIVE_TYPE", "drive")
             .env("RCLONE_CONFIG_AIRDRIVE_TOKEN", token_json)
-            .env("RCLONE_CONFIG_AIRDRIVE_SCOPE", "drive.file");
+            .env("RCLONE_CONFIG_AIRDRIVE_SCOPE", "drive");
         if let Some(cid) = &self.client_id {
             cmd.env("RCLONE_CONFIG_AIRDRIVE_CLIENT_ID", cid);
         }

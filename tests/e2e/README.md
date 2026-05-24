@@ -106,8 +106,9 @@ proceeding so the GCP console + browser OAuth dance both pick it up.
    - User type: **External**, status: **Testing** (no Google review needed).
    - **Test users**: add the test account email. Without this step the
      OAuth dance fails with `403 access_denied`.
-   - Scopes: `.../auth/drive.file` and `.../auth/drive.metadata.readonly`
-     are requested at runtime — listing them here is optional.
+   - Scopes: `.../auth/drive` (full read/write) is requested at runtime —
+     listing it here is optional. The consent prompt will read
+     *"See, edit, create, and delete all of your Google Drive files"*.
 4. <https://console.cloud.google.com/apis/credentials> → **+ Create
    credentials → OAuth client ID**:
    - Application type: **Desktop app**.
@@ -202,7 +203,8 @@ Each test creates a fresh sub-folder named
   inactivity, and apps in `Testing` mode on the consent screen cap
   refresh-token lifetime at 7 days. Either re-run `setup_e2e
   --force-new-token` periodically, OR move the consent screen to
-  `Production` (Google reviews scopes — `drive.file` is approval-light).
+  `Production` (Google reviews scopes — the full `drive` scope triggers the
+  sensitive-scope verification path, not the approval-light track).
 - **Concurrency**: the workflow-level concurrency group avoids parallel
   CI runs against the same account. Two engineers running locally at the
   same time can still collide; UUID-named per-run folders mitigate the

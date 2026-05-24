@@ -73,6 +73,22 @@ air-drive map ~/Drive 'path:My Drive/Sync'
 air-drive status         # confirms state, mapping, pending counters
 ```
 
+## OAuth scope
+
+air-drive requests the full `https://www.googleapis.com/auth/drive` scope on
+the consent screen — wording on Google's prompt is roughly *"See, edit, create,
+and delete all of your Google Drive files"*. The narrower `drive.file` scope
+only exposes files the daemon itself created, which makes it impossible to
+sync an already-populated Drive folder (the original blocker reported in
+issue #4).
+
+Google classifies `drive` as a sensitive scope. OAuth clients in `Testing`
+mode work fine but cap refresh tokens at 7 days, so the daemon will prompt for
+re-consent every week. Moving the client to `Production` requires Google's
+OAuth verification review (security assessment, homepage + privacy-policy
+URLs, possibly a demo video). See [`CLAUDE.md`](./CLAUDE.md) §V for the
+constitution-level rationale.
+
 ## Stack
 
 - **Language**: Rust (stable)

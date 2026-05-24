@@ -35,13 +35,15 @@ use crate::error::{Error, Result};
 /// **MVP placeholder**: replace before the first public release.
 pub const EMBEDDED_CLIENT_ID: &str = "REPLACE_BEFORE_RELEASE.apps.googleusercontent.com";
 
-/// Drive scopes requested by the daemon. `drive.file` covers everything we create or
-/// open; `drive.metadata.readonly` lets `about.user` and `files.list` work for the
-/// initial discovery.
-pub const DRIVE_SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/drive.metadata.readonly",
-];
+/// Drive scopes requested by the daemon. The full `drive` scope (read/write on
+/// every file the user owns or has access to) is the only way to see content the
+/// daemon did not itself create: `drive.file` restricts visibility to files
+/// opened or written through the app, which makes syncing an already-populated
+/// Drive folder impossible. Google flags `drive` as a sensitive scope — apps in
+/// `Testing` mode keep refresh tokens for 7 days, and going to `Production` puts
+/// the OAuth client through a verification review. That trade-off is accepted at
+/// constitution level (see `CLAUDE.md`).
+pub const DRIVE_SCOPES: &[&str] = &["https://www.googleapis.com/auth/drive"];
 
 /// File name of the OAuth token cache inside the config directory.
 pub const TOKENS_FILE: &str = "tokens.json";

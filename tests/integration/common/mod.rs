@@ -368,7 +368,7 @@ impl DriveMock {
                 "refresh_token": "mock-refresh-token",
                 "expires_in": 3600,
                 "token_type": "Bearer",
-                "scope": "https://www.googleapis.com/auth/drive.file"
+                "scope": "https://www.googleapis.com/auth/drive"
             })))
             .mount(&server)
             .await;

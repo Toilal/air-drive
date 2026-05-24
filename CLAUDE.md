@@ -88,7 +88,25 @@ shortcuts, shared folders, throttling, error recovery, renames).
 Reimplementing that from day one slows the MVP. The abstraction guarantees
 we are not locked into rclone forever.
 
-### V. Cross-platform, self-contained distribution
+### V. Full `drive` OAuth scope
+
+The daemon requests the broad `https://www.googleapis.com/auth/drive` scope —
+not the narrower `drive.file`. A sync client whose visibility is limited to
+files it created itself cannot sync an already-populated Drive folder, which
+defeats the product. Per-folder write grants do not exist in Google's OAuth
+surface, so a combination like `drive.readonly` + `drive.file` would still hide
+pre-existing content from the local watcher's perspective.
+
+*Trade-off*: `drive` is classified as a sensitive scope. Clients in `Testing`
+mode on the OAuth consent screen cap refresh-token lifetime at 7 days, and
+moving to `Production` requires Google's OAuth verification review (security
+assessment, homepage + privacy-policy URLs, demo video). This is accepted as
+the cost of doing the job correctly.
+
+*Why*: any sync client that cannot see the user's existing files is a
+non-starter. Issue #4 captures the original report.
+
+### VI. Cross-platform, self-contained distribution
 
 A single binary per platform, with no non-trivial system dependencies beyond
 a system webview (Tauri). Target platforms by priority: Linux x86_64, Linux
