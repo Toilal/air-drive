@@ -1,0 +1,57 @@
+# GitHub issue labels for air-drive.
+#
+# This file is the source of truth for the repo's labels. There is no
+# auto-sync workflow — apply changes manually with the `gh` CLI:
+#
+#     gh label create "<name>" --color "<color>" --description "<description>"
+#     gh label edit   "<name>" --color "<color>" --description "<description>"
+#     gh label delete "<name>" --yes
+#
+# Colors are 6-char hex without the leading `#`. Keep this file sorted by
+# section, then by priority/weight inside each section.
+
+# --- Priority ----------------------------------------------------------------
+# Set exactly one priority/* label on every triaged issue. Untriaged issues
+# keep the `triage` label (auto-applied by the issue templates).
+
+- name: priority/critical
+  color: "b60205"
+  description: "Blocks usage, data loss, or corruption — fix immediately."
+
+- name: priority/high
+  color: "d93f0b"
+  description: "Must land in the current release."
+
+- name: priority/medium
+  color: "fbca04"
+  description: "Nice-to-have for the next release."
+
+- name: priority/low
+  color: "0e8a16"
+  description: "Backlog — not urgent."
+
+# --- Type --------------------------------------------------------------------
+# Auto-applied by the issue templates; kept here so manual creations stay
+# consistent.
+
+- name: bug
+  color: "d73a4a"
+  description: "Something is broken."
+
+- name: enhancement
+  color: "a2eeef"
+  description: "New feature or improvement request."
+
+- name: triage
+  color: "ededed"
+  description: "Awaiting maintainer triage — remove once priority/* is set."
+
+# --- Contribution friendliness ----------------------------------------------
+
+- name: good first issue
+  color: "7057ff"
+  description: "Good entry point for new contributors."
+
+- name: help wanted
+  color: "008672"
+  description: "Maintainers welcome external contributions on this one."
