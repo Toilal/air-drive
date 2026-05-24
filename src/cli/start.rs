@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::cli::interactive;
 use crate::cli::{ExitCode, runtime};
 use crate::config::Config;
 use crate::daemon::{DaemonContext, lock::Lock};
@@ -146,10 +147,12 @@ pub async fn run(
 ///
 /// - If `path` is an existing directory: succeed.
 /// - If `path` exists but is not a directory: actionable error.
-/// - If `path` is missing and `auto_create` is `true`: create the directory
-///   (and any missing parents), log at `tracing::info`, succeed.
-/// - If `path` is missing and `auto_create` is `false`: actionable error
-///   pointing the user at the `watch.auto_create_root` toggle.
+/// - If `path` is missing and `auto_create` is `true`: create silently.
+/// - If `path` is missing and `auto_create` is `false`:
+///   - on an interactive stdin (TTY): prompt the user; create on confirmation.
+///   - otherwise (systemd, piped script): refuse with an actionable error
+///     pointing the user at the `watch.auto_create_root` toggle. Conservative
+///     by design so a daemon restart cannot silently materialise a new tree.
 fn ensure_local_root(path: &Path, auto_create: bool) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => Ok(()),
@@ -159,22 +162,30 @@ fn ensure_local_root(path: &Path, auto_create: bool) -> Result<()> {
             path.display()
         ))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if auto_create {
-                std::fs::create_dir_all(path).map_err(|io| {
-                    Error::Mapping(format!(
-                        "watched folder `{}` does not exist and could not be created: {io}",
-                        path.display()
-                    ))
-                })?;
-                tracing::info!(path = %path.display(), "created watched folder");
-                Ok(())
+            let allow_create = if auto_create {
+                true
             } else {
-                Err(Error::Mapping(format!(
-                    "watched folder `{}` does not exist. \
-                     Create it manually or set `watch.auto_create_root = true` in config.toml.",
+                interactive::confirm(&format!(
+                    "watched folder `{}` does not exist — create it?",
                     path.display()
-                )))
+                ))?
+            };
+            if !allow_create {
+                return Err(Error::Mapping(format!(
+                    "watched folder `{}` does not exist. \
+                     Create it manually, set `watch.auto_create_root = true` in config.toml, \
+                     or re-run interactively to confirm.",
+                    path.display()
+                )));
             }
+            std::fs::create_dir_all(path).map_err(|io| {
+                Error::Mapping(format!(
+                    "watched folder `{}` does not exist and could not be created: {io}",
+                    path.display()
+                ))
+            })?;
+            tracing::info!(path = %path.display(), "created watched folder");
+            Ok(())
         }
         Err(e) => Err(Error::Mapping(format!(
             "cannot inspect watched folder `{}`: {e}",

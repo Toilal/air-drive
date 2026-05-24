@@ -6,6 +6,7 @@
 //! [`unlink`], [`setup`]).
 
 pub mod init;
+pub mod interactive;
 pub mod link;
 pub mod map;
 pub mod pause;

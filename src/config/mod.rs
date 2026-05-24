@@ -51,13 +51,31 @@ pub struct OauthConfig {
 }
 
 /// Folder mapping display info. The authoritative `remote_folder_id` lives in `state.db`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MappingConfig {
     /// Absolute path of the watched local folder, for display.
     pub local_path: Option<String>,
     /// Human-readable remote folder path, for display.
     pub remote_folder_name: Option<String>,
+    /// When `true`, `air-drive map` creates any missing folder under a `path:`
+    /// notation target on Drive (segment-by-segment from the deepest existing
+    /// parent) without prompting. When `false` (default), the command prompts
+    /// the user interactively before creating; on a non-interactive stdin or
+    /// when the user declines, it errors with `MapRemoteUnresolvable`. Only
+    /// applies to `path:` notation — bare IDs and URLs reference a specific
+    /// resource that cannot be synthesised.
+    pub auto_create_remote_root: bool,
+}
+
+impl Default for MappingConfig {
+    fn default() -> Self {
+        Self {
+            local_path: None,
+            remote_folder_name: None,
+            auto_create_remote_root: false,
+        }
+    }
 }
 
 /// Daemon runtime tuning.
@@ -99,11 +117,12 @@ pub struct WatchConfig {
     /// Glob patterns matched against the file name. Default list seeded by
     /// [`WatchConfig::default`].
     pub ignore_patterns: Vec<String>,
-    /// When `true` (default), the daemon creates `mapping.local_path` on
-    /// startup if it doesn't exist yet — including any intermediate parents.
-    /// When `false`, the daemon refuses to start with an actionable error,
-    /// leaving the user in charge of creating the folder. The CLI's pre-flight
-    /// (`cli::start::ensure_local_root`) lives there.
+    /// When `true`, `air-drive map` and `air-drive start` create
+    /// `mapping.local_path` without prompting if it does not exist (including
+    /// any intermediate parents). When `false` (default), the CLI prompts the
+    /// user interactively before creating; on a non-interactive stdin (systemd
+    /// unit, piped script) or when the user declines, it refuses to start with
+    /// an actionable error.
     pub auto_create_root: bool,
 }
 
@@ -114,7 +133,7 @@ impl Default for WatchConfig {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
-            auto_create_root: true,
+            auto_create_root: false,
         }
     }
 }

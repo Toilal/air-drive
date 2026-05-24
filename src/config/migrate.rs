@@ -56,7 +56,7 @@ const FIELD_DESCRIPTIONS: &[(&str, &str, &str)] = &[
     (
         "watch",
         "auto_create_root",
-        "When true, the daemon creates the watched folder on startup if it doesn't exist. When false, startup fails with an actionable error.",
+        "When true, the watched folder is created without prompting if missing. When false (default), the CLI prompts the user interactively on a TTY, or fails conservatively otherwise.",
     ),
     (
         "oauth",
@@ -77,6 +77,11 @@ const FIELD_DESCRIPTIONS: &[(&str, &str, &str)] = &[
         "mapping",
         "remote_folder_name",
         "Human-readable remote folder path (display only; authoritative value lives in state.db).",
+    ),
+    (
+        "mapping",
+        "auto_create_remote_root",
+        "When true, `air-drive map` creates any missing folder under a path: notation target on Drive without prompting. When false (default), the CLI prompts the user interactively on a TTY, or fails conservatively otherwise. Only applies to path: notation — bare IDs and URLs reference a specific resource.",
     ),
     (
         "rclone",

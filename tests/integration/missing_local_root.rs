@@ -3,12 +3,14 @@
 //!
 //! Two paths to exercise:
 //!
-//! 1. `watch.auto_create_root = true` (default) + missing folder → daemon
-//!    creates it and proceeds.
-//! 2. `watch.auto_create_root = false` + missing folder → daemon refuses to
-//!    start with an actionable error message that mentions the toggle and
-//!    does **not** leak the raw `notify watch(...): No such file or directory
-//!    (os error 2)` wording the pre-fix code surfaced.
+//! 1. `watch.auto_create_root = true` + missing folder → daemon creates it
+//!    and proceeds.
+//! 2. `watch.auto_create_root = false` (default) + missing folder → daemon
+//!    refuses to start on a non-interactive stdin (the test harness pipes
+//!    stdin, so `interactive::confirm` returns `false` conservatively) with
+//!    an actionable error message that mentions the toggle and does **not**
+//!    leak the raw `notify watch(...): No such file or directory (os error 2)`
+//!    wording the pre-fix code surfaced.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

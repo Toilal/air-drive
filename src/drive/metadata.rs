@@ -189,12 +189,16 @@ pub async fn create_folder(http: &DriveHttp, parent_id: &str, name: &str) -> Res
 /// - `path:My Drive/Sync` notation → walked segment by segment from `My Drive` root
 ///
 /// The resolved file MUST be a folder, otherwise an [`Error::Mapping`] is returned.
-pub async fn resolve_path(http: &DriveHttp, spec: &str) -> Result<String> {
+///
+/// When `auto_create` is `true`, missing segments under `path:` notation are
+/// created on the fly; ID and URL forms ignore the flag (they reference a
+/// specific existing resource).
+pub async fn resolve_path(http: &DriveHttp, spec: &str, auto_create: bool) -> Result<String> {
     let trimmed = spec.trim();
 
     // `path:` notation.
     if let Some(p) = trimmed.strip_prefix("path:") {
-        return resolve_path_notation(http, p).await;
+        return resolve_path_notation(http, p, auto_create).await;
     }
 
     // Drive URL.
@@ -220,7 +224,11 @@ fn ensure_folder(meta: &DriveFileMeta) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_path_notation(http: &DriveHttp, path: &str) -> Result<String> {
+async fn resolve_path_notation(
+    http: &DriveHttp,
+    path: &str,
+    auto_create: bool,
+) -> Result<String> {
     // Strip leading/trailing slashes and split into segments. Empty path resolves to the
     // user's My Drive root.
     let segments: Vec<&str> = path
@@ -243,11 +251,26 @@ async fn resolve_path_notation(http: &DriveHttp, path: &str) -> Result<String> {
     let mut current = start;
     for seg in rest {
         let children = list_children(http, &current).await?;
-        let next = children
-            .into_iter()
-            .find(|c| c.is_folder() && c.name == *seg)
-            .ok_or_else(|| Error::Mapping(format!("no subfolder `{seg}` under `{current}`")))?;
-        current = next.id;
+        let found = children.into_iter().find(|c| c.is_folder() && c.name == *seg);
+        current = match found {
+            Some(c) => c.id,
+            None if auto_create => {
+                let created = create_folder(http, &current, seg).await?;
+                tracing::info!(
+                    parent = %current,
+                    name = %seg,
+                    new_id = %created.id,
+                    "created missing remote folder"
+                );
+                created.id
+            }
+            None => {
+                return Err(Error::Mapping(format!(
+                    "no subfolder `{seg}` under `{current}` (enable \
+                     `mapping.auto_create_remote_root` to create it automatically)"
+                )));
+            }
+        };
     }
     Ok(current)
 }
