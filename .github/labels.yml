@@ -47,6 +47,51 @@
   color: "ededed"
   description: "Awaiting maintainer triage — remove once priority/* is set."
 
+# --- Area --------------------------------------------------------------------
+# Identifies the affected code area. Multiple area/* labels are fine when an
+# issue crosses module boundaries. Uniform colour by design — the distinction
+# lives in the name, not the hue.
+
+- name: area/cli
+  color: "1d76db"
+  description: "src/cli — commands, argument parsing, CLI UX."
+
+- name: area/daemon
+  color: "1d76db"
+  description: "src/daemon — runtime, lifecycle, dispatcher, in-flight ops."
+
+- name: area/watch
+  color: "1d76db"
+  description: "src/watch — notify watcher, debounce, ignore patterns."
+
+- name: area/drive-api
+  color: "1d76db"
+  description: "src/drive — OAuth, HTTP client, changes.list poller, metadata."
+
+- name: area/engine
+  color: "1d76db"
+  description: "src/engine — SyncEngine trait, RcloneEngine, staging."
+
+- name: area/reconcile
+  color: "1d76db"
+  description: "src/reconcile — apply_local/remote, fingerprints, conflict resolution."
+
+- name: area/state
+  color: "1d76db"
+  description: "src/state — SQLite schema, migrations, items/ops/cursor/mapping."
+
+- name: area/ui
+  color: "1d76db"
+  description: "Tauri front-end and tray UI (future)."
+
+- name: area/docs
+  color: "1d76db"
+  description: "README, CLAUDE.md, doc-comments, examples."
+
+- name: area/ci
+  color: "1d76db"
+  description: ".github/workflows, install.sh, packaging, release tooling."
+
 # --- Contribution friendliness ----------------------------------------------
 
 - name: good first issue
