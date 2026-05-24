@@ -1,11 +1,11 @@
-//! Pending-operation dispatcher (T055, T055b).
+//! Pending-operation dispatcher.
 //!
 //! Pulls due operations from `pending_operation` and executes them via the
 //! configured [`SyncEngine`]. On success the row is removed; on failure the
 //! dispatcher applies exponential back-off with ±20 % jitter (1 s → 60 s, max
 //! [`MAX_ATTEMPTS`] tries) and reschedules. After [`MAX_ATTEMPTS`] failures the
-//! op is left in place with its `last_error` populated — a future Phase 5 will
-//! surface that as `status: blocked`.
+//! op is left in place with its `last_error` populated — a future iteration
+//! will surface that as `status: blocked`.
 //!
 //! The dispatcher loop wakes every [`POLL_INTERVAL`] or whenever a new op is
 //! enqueued via the wake channel (the reconciler signals on enqueue to skip
@@ -117,12 +117,11 @@ pub async fn run(
             .await
             {
                 Ok(()) => {
-                    // T060 — bump the last_sync_at + items_uploaded /
-                    // items_downloaded counters that `air-drive status`
-                    // surfaces. Upload/RenameRemote count as uploaded;
-                    // Download as downloaded; deletes don't increment
-                    // anything (the conflict + status schema doesn't track
-                    // them separately).
+                    // Bump the last_sync_at + items_uploaded / items_downloaded
+                    // counters that `air-drive status` surfaces.
+                    // Upload/RenameRemote count as uploaded; Download as
+                    // downloaded; deletes don't increment anything (the
+                    // conflict + status schema doesn't track them separately).
                     let (delta_up, delta_down) = match op.op {
                         Operation::Upload | Operation::RenameRemote => (1, 0),
                         Operation::Download => (0, 1),
@@ -144,7 +143,7 @@ pub async fn run(
                     tracing::error!(
                         op_id = op.id.0,
                         error = %msg,
-                        "auth failure — daemon is now blocked (FR-009)"
+                        "auth failure — daemon is now blocked"
                     );
                     meta::set_blocked(db.connection(), BlockedKind::Auth, &msg, unix_now())
                         .await
@@ -286,7 +285,7 @@ async fn execute(
             if let Some(parent) = local.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     if e.kind() == std::io::ErrorKind::StorageFull {
-                        // FR-022: don't try to write partials when the disk is full.
+                        // Don't try to write partials when the disk is full.
                         Error::Mapping(format!("ENOSPC creating parent of {}", local.display()))
                     } else {
                         Error::Io(e)

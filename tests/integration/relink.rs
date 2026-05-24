@@ -1,4 +1,4 @@
-//! US3.4 — refresh token revoked (T063, FR-009).
+//! Refresh token revoked.
 //!
 //! Google revokes the daemon's token (mocked here as a permanent 401 from
 //! the Drive API). The daemon must:
@@ -50,7 +50,7 @@ async fn us3_4_refresh_revoked_blocks_with_kind_auth() {
     // Daemon stays alive — verify it before tearing down.
     assert!(
         daemon.poll_alive().is_none(),
-        "daemon exited after auth failure (should stay running per FR-009)"
+        "daemon exited after auth failure (should stay running)"
     );
 
     daemon.shutdown().await;

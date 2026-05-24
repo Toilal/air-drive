@@ -1,16 +1,16 @@
-//! `air-drive setup` (T040 + T078b + feature 002).
+//! `air-drive setup`.
 //!
 //! Three distinct jobs, all reachable from the same `setup` subcommand:
 //!
-//! - `--install-service` (T078b) — copy the bundled
+//! - `--install-service` — copy the bundled
 //!   `assets/systemd/air-drive.service` template to
 //!   `~/.config/systemd/user/air-drive.service` and run
 //!   `systemctl --user enable --now air-drive.service`. Works standalone —
 //!   no interactive setup required, the user can already have linked and
 //!   mapped manually.
-//! - `--uninstall-service` (feature 002) — symmetric reverse: stop and
-//!   disable the unit, remove the file, refresh the systemd cache. Idempotent
-//!   on a clean host; degrades gracefully when `systemctl` is unavailable.
+//! - `--uninstall-service` — symmetric reverse: stop and disable the unit,
+//!   remove the file, refresh the systemd cache. Idempotent on a clean host;
+//!   degrades gracefully when `systemctl` is unavailable.
 //! - Interactive flow (`link → map → start`) — still stubbed because it
 //!   needs a TTY-aware prompt crate ([`dialoguer`]). Wiring it in is left
 //!   out of MVP scope; the user can drive each subcommand individually.
@@ -110,7 +110,7 @@ fn install_systemd_unit(config_dir_override: Option<&Path>) -> Result<ExitCode> 
 /// unit is already gone, the file is already absent, or `systemctl` is
 /// unavailable on the host.
 ///
-/// Honours the same XDG path resolution as the install path (FR-010), so the
+/// Honours the same XDG path resolution as the install path, so the
 /// install/uninstall pair always operates on the same file. Never touches the
 /// daemon's config, state, tokens, account, mapping, or local watched folder.
 fn uninstall_systemd_unit(config_dir_override: Option<&Path>) -> Result<ExitCode> {
@@ -130,9 +130,9 @@ fn uninstall_systemd_unit(config_dir_override: Option<&Path>) -> Result<ExitCode
     //   - success: unit was loaded; now stopped and disabled.
     //   - `systemctl` missing on PATH (NotFound): flip the skipped flag and
     //     continue to the file removal — we may still have a stray file to
-    //     clean up on a non-systemd host (FR-007).
+    //     clean up on a non-systemd host.
     //   - non-zero exit reporting "unit not loaded" / "could not be found":
-    //     the unit was never enabled; treat as success and continue (FR-006).
+    //     the unit was never enabled; treat as success and continue.
     //   - other non-zero exit: surface as Error::Config — a real systemd error
     //     the user should know about.
     let disable = std::process::Command::new("systemctl")
@@ -170,7 +170,7 @@ fn uninstall_systemd_unit(config_dir_override: Option<&Path>) -> Result<ExitCode
 
     // Step 2 — remove the unit file. Tolerated outcomes:
     //   - success: file existed and is now gone.
-    //   - NotFound: file already absent — idempotent no-op (FR-006).
+    //   - NotFound: file already absent — idempotent no-op.
     //   - other io::Error: surface (extremely unlikely under user-owned XDG).
     let file_removed = match std::fs::remove_file(&unit_path) {
         Ok(()) => {
@@ -214,7 +214,7 @@ fn uninstall_systemd_unit(config_dir_override: Option<&Path>) -> Result<ExitCode
         }
     }
 
-    // Single-line confirmation summarising what changed (FR-009).
+    // Single-line confirmation summarising what changed.
     let summary = match (file_removed, systemctl_skipped) {
         (true, false) => format!(
             "[setup] removed air-drive.service ({}) and refreshed systemd cache",

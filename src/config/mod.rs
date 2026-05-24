@@ -142,7 +142,7 @@ pub fn default_ignore_patterns() -> &'static [&'static str] {
     ]
 }
 
-/// Explicit `rclone` binary override (cf. `research.md §5`, step 1).
+/// Explicit `rclone` binary override.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RcloneConfig {

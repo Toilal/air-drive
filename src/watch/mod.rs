@@ -2,8 +2,8 @@
 //!
 //! [`Watcher`] wraps `notify::RecommendedWatcher` (inotify on Linux), maps raw
 //! `notify::Event`s into the daemon-internal [`WatchEvent`] enum, filters out
-//! symlinks + special files (FR-013), and forwards everything to a tokio mpsc
-//! channel that the debouncer (`super::debounce`) consumes.
+//! symlinks + special files, and forwards everything to a tokio mpsc channel
+//! that the debouncer (`super::debounce`) consumes.
 //!
 //! The watcher holds the inotify file descriptor for the entire lifetime of the
 //! returned struct — dropping it cancels the subscription.
@@ -123,7 +123,7 @@ impl Watcher {
 
 /// Convert a `notify::Event` to zero or more [`WatchEvent`]s. Filters out:
 ///
-/// - symlinks and special files (lstat + reject non-regular non-directory) per FR-013
+/// - symlinks and special files (lstat + reject non-regular non-directory)
 /// - paths under `<root>/.air-drive-partial/` — those are our own staging artefacts
 ///
 /// Only one event is produced per logical path; for compound kinds (e.g. some
@@ -173,11 +173,10 @@ fn convert_event(ev: &notify::Event, root: &Path, ignore: &GlobSet) -> Vec<Watch
 
 /// Returns `true` if the path either doesn't exist (deletes get filtered to None
 /// metadata) OR is a regular file / directory. Symlinks and special files
-/// (FIFO, socket, block/char device) are rejected with a one-line `tracing::info`
-/// per FR-013. Files whose name matches one of the user-configurable
-/// `watch.ignore_patterns` globs are also rejected — these are typically
-/// editor / OS scratch files (`.foo.swp`, `.DS_Store`, …) the user never wants
-/// synced.
+/// (FIFO, socket, block/char device) are rejected with a one-line `tracing::info`.
+/// Files whose name matches one of the user-configurable `watch.ignore_patterns`
+/// globs are also rejected — these are typically editor / OS scratch files
+/// (`.foo.swp`, `.DS_Store`, …) the user never wants synced.
 fn accept_local_file(path: &Path, ignore: &GlobSet) -> bool {
     if let Some(name) = path.file_name()
         && ignore.is_match(Path::new(name))
@@ -201,7 +200,7 @@ fn accept_local_file(path: &Path, ignore: &GlobSet) -> bool {
     }
     tracing::info!(
         path = %path.display(),
-        "ignoring non-regular file (symlink, fifo, socket, device — FR-013)"
+        "ignoring non-regular file (symlink, fifo, socket, device)"
     );
     false
 }
@@ -325,7 +324,7 @@ mod tests {
         let (_w, mut rx) = Watcher::start(tmp.path(), default_matcher()).unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Create a symlink — the create event should be filtered out (FR-013).
+        // Create a symlink — the create event should be filtered out.
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         // Anything we receive within 500 ms MUST be for `target.txt` (created
@@ -346,7 +345,7 @@ mod tests {
         .await;
         assert!(
             result.is_err() || result.unwrap().is_none(),
-            "symlink event should be filtered out per FR-013"
+            "symlink event should be filtered out"
         );
     }
 }

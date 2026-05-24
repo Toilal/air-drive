@@ -1,4 +1,4 @@
-//! Tracing init + standardised operation-span fields (FR-025).
+//! Tracing init + standardised operation-span fields.
 //!
 //! Every operation log line MUST include the fields `event`, `op_id`, `item_id` (when
 //! applicable), and `relative_path` (when applicable). Use the [`op_span!`] macro at the
@@ -69,7 +69,7 @@ pub fn init_tracing(verbose: u8, log_file: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Build an `INFO`-level span carrying the standard FR-025 operation fields.
+/// Build an `INFO`-level span carrying the standard operation fields.
 ///
 /// Two arities:
 ///

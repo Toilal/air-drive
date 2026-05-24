@@ -1,10 +1,10 @@
-//! `air-drive map` (T038, FR-002).
+//! `air-drive map`.
 //!
 //! Canonicalises the local path (creating it if missing), resolves the remote folder
 //! argument (Drive ID / URL / `path:` notation) to a Drive ID, and writes the
 //! singleton `folder_mapping` row.
 //!
-//! Exit codes (per `contracts/cli.md`):
+//! Exit codes:
 //!
 //! - `0` — success.
 //! - `4` — local path doesn't exist *and* couldn't be created, or exists but is a file.

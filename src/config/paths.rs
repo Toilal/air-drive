@@ -10,9 +10,9 @@
 //!   falls back to `<config_dir>/runtime` when no runtime dir is set — deterministic per
 //!   user, no uid lookup required).
 //!
-//! The `--config-dir` CLI flag (cf. `contracts/cli.md`) only overrides the **config**
-//! directory, matching the contract; the cache and runtime directories stay on their XDG
-//! defaults so users who relocate config don't accidentally split their rclone cache.
+//! The `--config-dir` CLI flag only overrides the **config** directory; the cache and
+//! runtime directories stay on their XDG defaults so users who relocate config don't
+//! accidentally split their rclone cache.
 
 use std::path::{Path, PathBuf};
 
@@ -77,7 +77,7 @@ impl Paths {
     /// Create every directory on disk with mode `0700`. Idempotent.
     ///
     /// `0700` keeps the parent directory readable only by the owning user — important
-    /// for the config directory because it holds `tokens.json` (FR-016).
+    /// for the config directory because it holds `tokens.json`.
     pub fn ensure_exist(&self) -> Result<()> {
         for dir in [&self.config, &self.cache, &self.runtime] {
             std::fs::create_dir_all(dir)?;

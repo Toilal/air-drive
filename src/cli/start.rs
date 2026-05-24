@@ -1,4 +1,4 @@
-//! `air-drive start` (T039, T058, FR-014, FR-017).
+//! `air-drive start`.
 //!
 //! Acquires the single-instance lock, loads account + mapping, optionally runs
 //! the initial reconciliation, then enters the continuous-sync daemon loop
@@ -29,7 +29,7 @@ pub async fn run(
 ) -> Result<ExitCode> {
     let paths = runtime::resolve_paths(config_dir_override)?;
 
-    // 1. Acquire the single-instance lock (FR-017). On contention, exit 6.
+    // 1. Acquire the single-instance lock. On contention, exit 6.
     let _lock = match Lock::acquire(paths.config()) {
         Ok(l) => l,
         Err(Error::Lock { pid }) => {
@@ -53,7 +53,7 @@ pub async fn run(
     };
 
     // 3. Initial-sync gate: if the cursor has never been set and --initial-sync
-    //    isn't passed, refuse (per contracts/cli.md).
+    //    isn't passed, refuse.
     let cursor_exists = cursor::get(db.connection(), mapping_row.id)
         .await?
         .is_some();
@@ -77,7 +77,7 @@ pub async fn run(
     )
     .await?;
 
-    // FR-010 housekeeping: drop any leftover partials from a previous crash.
+    // Housekeeping: drop any leftover partials from a previous crash.
     crate::engine::staging::cleanup_orphans(&local_root)?;
 
     // 5. First-time initial sync.
@@ -102,7 +102,7 @@ pub async fn run(
         return Ok(ExitCode::Ok);
     }
 
-    // 6. Continuous loop (T058). The cursor must exist by now; if it doesn't,
+    // 6. Continuous loop. The cursor must exist by now; if it doesn't,
     //    something is badly wrong — surface as an error rather than silently
     //    skipping the loop.
     if cursor::get(db.connection(), mapping_row.id)

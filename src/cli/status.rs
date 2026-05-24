@@ -1,8 +1,7 @@
-//! `air-drive status [--json]` (T068, T069 — FR-008).
+//! `air-drive status [--json]`.
 //!
 //! Reads the on-disk state DB and renders a snapshot in either human-readable
-//! form (default) or as a JSON document matching
-//! `specs/001-minimal-sync-daemon/contracts/status.schema.json`.
+//! form (default) or as a JSON document matching `contracts/status.schema.json`.
 //!
 //! Liveness detection: we try to acquire the single-instance lock
 //! non-blockingly. If [`crate::daemon::lock::Lock::acquire`] returns
@@ -12,8 +11,8 @@
 //!
 //! "syncing" vs "idle" comes from the `pending_operation` queue: any pending
 //! op flips the state to syncing. The richer states (`paused`, `blocked`,
-//! `error`) require the daemon to signal them via the control socket
-//! (Phase 5b) — for now we surface `idle`/`syncing` only.
+//! `error`) require the daemon to signal them via the control socket — for
+//! now we surface `idle`/`syncing` only.
 
 use std::path::Path;
 

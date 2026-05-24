@@ -1,4 +1,4 @@
-//! Continuous reconciliation (T053).
+//! Continuous reconciliation.
 //!
 //! Two entry points consumed by the daemon's main loop:
 //!
@@ -6,7 +6,7 @@
 //! - [`apply_remote`] — `RemoteChange` → same, on the Drive side.
 //!
 //! Both consult `sync_item` to suppress echoes (a change we caused via our own
-//! upload) and to skip native Google Docs (FR-011).
+//! upload) and to skip native Google Docs.
 //!
 //! The functions are stateless beyond the database — they don't talk to the
 //! engine; the dispatcher (`daemon::runtime`) does.
@@ -26,8 +26,8 @@ use crate::state::unix_now;
 use crate::watch::WatchEvent;
 
 /// Native Google Docs / Sheets / Slides mime prefix. These do not have an md5
-/// and cannot be synced as opaque bytes — skipped silently per FR-011 (the
-/// poller still observes them; the reconciler is the gate).
+/// and cannot be synced as opaque bytes — skipped silently (the poller still
+/// observes them; the reconciler is the gate).
 const NATIVE_GAPPS_PREFIX: &str = "application/vnd.google-apps.";
 
 /// Convert a `WatchEvent` into `pending_operation` rows.
@@ -89,8 +89,8 @@ pub async fn apply_local(
 
         WatchEvent::Deleted(p) => {
             let rel = strip_root(&p, local_root)?;
-            // Conflict cleanup (T054b): if the deleted path is one side of an
-            // open conflict_record, the user just resolved it — drop the row.
+            // Conflict cleanup: if the deleted path is one side of an open
+            // conflict_record, the user just resolved it — drop the row.
             crate::reconcile::conflict::cleanup_on_local_delete(db, &rel).await?;
             if let Some(item) =
                 items::get_by_relative_path(db.connection(), mapping_id, &rel).await?
@@ -144,8 +144,8 @@ pub async fn apply_local(
 }
 
 /// Convert a `RemoteChange` into `pending_operation` rows. Filters native
-/// Google Docs (FR-011), our own in-flight ops ([`InFlightOps`]), and
-/// post-echo md5 matches.
+/// Google Docs, our own in-flight ops ([`InFlightOps`]), and post-echo md5
+/// matches.
 pub async fn apply_remote(
     change: RemoteChange,
     db: &Db,
@@ -189,7 +189,7 @@ pub async fn apply_remote(
             id = %file.id,
             name = %file.name,
             mime = %file.mime_type,
-            "skipping native Google Docs file (FR-011)"
+            "skipping native Google Docs file"
         );
         return Ok(());
     }
@@ -205,7 +205,7 @@ pub async fn apply_remote(
             if item.md5.as_deref() == Some(remote_md5.as_str()) && item.size == Some(remote_size) {
                 return Ok(());
             }
-            // Conflict detection (T054): if the local file's CURRENT md5
+            // Conflict detection: if the local file's CURRENT md5
             // differs from the last-synced fingerprint, both sides drifted
             // independently. Open a conflict — rename the local copy, insert
             // a conflict_record, then proceed with the Download so the remote

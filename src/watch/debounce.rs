@@ -1,4 +1,4 @@
-//! 200 ms event debounce per logical path (T051).
+//! 200 ms event debounce per logical path.
 //!
 //! Why: editor saves are a typical source of bursts. `vim` for instance writes
 //! through a tempfile + rename, producing `Create` + `Remove` + `Create` on the

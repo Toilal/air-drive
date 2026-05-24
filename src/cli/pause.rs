@@ -1,4 +1,4 @@
-//! `air-drive pause` (T066, FR-015).
+//! `air-drive pause`.
 //!
 //! Thin client over `daemon::pause::send_command`. Connects to the control
 //! socket, sends `pause`, prints the daemon's reply. Exit `0` on ack, `7`

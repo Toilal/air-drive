@@ -1,4 +1,4 @@
-//! `conflict_record` table — open conflicts surfaced by the status command (FR-006).
+//! `conflict_record` table — open conflicts surfaced by the status command.
 
 use rusqlite::params;
 use tokio_rusqlite::Connection;

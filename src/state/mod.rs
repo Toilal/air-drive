@@ -5,7 +5,7 @@
 //! - [`Db`] wraps a `tokio_rusqlite::Connection` (async wrapper around `rusqlite` with a
 //!   dedicated thread). At open time, the DB is configured with `WAL` + `synchronous =
 //!   NORMAL` + `foreign_keys = ON`, the `schema_version` bootstrap runs, and forward-only
-//!   migrations are applied (FR-024).
+//!   migrations are applied.
 //! - One submodule per logical table — [`accounts`], [`mapping`], [`items`], [`ops`],
 //!   [`conflicts`], [`cursor`]. Each exposes typed CRUD helpers as `async fn`.
 //!
@@ -42,7 +42,7 @@ impl Db {
     /// On Unix the resulting file is `chmod`ed to `0600` after creation.
     ///
     /// Returns [`Error::Config`] when the on-disk schema version is **newer** than the
-    /// binary supports (FR-024 — upgrade required, no downgrade).
+    /// binary supports (upgrade required, no downgrade).
     pub async fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).await?;
         conn.call(|c| {

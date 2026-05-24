@@ -105,9 +105,8 @@ CREATE TABLE drive_change_cursor (
 "#;
 
 /// v2 — single-row `state_meta` for surfaceable daemon state. Today we use the
-/// `blocked_*` triple (FR-009, FR-020) and the `last_sync_*` triple (FR-008
-/// section "last_sync"). Future state can be added as new columns without
-/// breaking compat.
+/// `blocked_*` triple and the `last_sync_*` triple. Future state can be added
+/// as new columns without breaking compat.
 const V2_SCHEMA: &str = r#"
 CREATE TABLE state_meta (
     id               INTEGER PRIMARY KEY CHECK (id = 1),

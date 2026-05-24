@@ -1,4 +1,4 @@
-//! Pause/resume control plane (T065).
+//! Pause/resume control plane.
 //!
 //! Two pieces work together:
 //!
@@ -140,10 +140,10 @@ async fn handle_client(stream: UnixStream, state: PauseState) -> Result<()> {
             "ok\n"
         }
         "status-snapshot" => {
-            // Phase 5 batch 2 stops here. A richer snapshot reply (matching
-            // the JSON schema, with live counters) lands when we wire the
-            // daemon's accumulated `last_sync` + `last_error` state into the
-            // status path. For now, `air-drive status` reads the DB directly.
+            // A richer snapshot reply (matching the JSON schema, with live
+            // counters) lands when we wire the daemon's accumulated
+            // `last_sync` + `last_error` state into the status path. For now,
+            // `air-drive status` reads the DB directly.
             "{\"alive\":true}\n"
         }
         _ => "error: unknown command\n",

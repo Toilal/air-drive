@@ -102,7 +102,7 @@ impl SyncEngine for HttpEngine {
     }
 
     async fn download(&self, remote_id: &str, local: &Path, local_root: &Path) -> Result<()> {
-        // FR-010: every download — even nested files (`dir/sub/leaf.txt`) — stages
+        // Every download — even nested files (`dir/sub/leaf.txt`) — stages
         // under the SAME `<local_root>/.air-drive-partial/` directory so the
         // start-up orphan-sweep finds all leftovers in one place.
         let op_id = format!(

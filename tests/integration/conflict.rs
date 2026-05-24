@@ -1,4 +1,4 @@
-//! Conflict scenarios — US3.2 (T061).
+//! Conflict scenarios.
 //!
 //! While the daemon was offline, both sides of a previously-synced file
 //! diverge. On restart the daemon must detect the divergence and apply the

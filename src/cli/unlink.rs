@@ -1,9 +1,9 @@
-//! `air-drive unlink` (T040b, FR-018, FR-019).
+//! `air-drive unlink`.
 //!
 //! Removes the linked account row, the folder-mapping row, and the OAuth tokens file.
-//! The local watched folder *contents* are intentionally left alone (FR-019).
+//! The local watched folder *contents* are intentionally left alone.
 //!
-//! Exit codes (per `contracts/cli.md`):
+//! Exit codes:
 //!
 //! - `0` — success.
 //! - `8` — refused because a daemon is currently running against this config.
@@ -19,8 +19,8 @@ use crate::error::{Error, Result};
 pub async fn run(config_dir_override: Option<&Path>, _yes: bool) -> Result<ExitCode> {
     let paths = runtime::resolve_paths(config_dir_override)?;
 
-    // Refuse if a daemon is running (FR-018). We try to acquire the lock; if it
-    // succeeds, drop it immediately and proceed. If it fails with Lock, exit 8.
+    // Refuse if a daemon is running. We try to acquire the lock; if it succeeds,
+    // drop it immediately and proceed. If it fails with Lock, exit 8.
     match Lock::acquire(paths.config()) {
         Ok(_held) => { /* we hold it, drop at end of scope */ }
         Err(Error::Lock { pid }) => {

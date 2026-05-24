@@ -1,4 +1,4 @@
-//! Conflict detection + resolution (T054 + T054b, FR-006).
+//! Conflict detection + resolution.
 //!
 //! ## When a conflict fires
 //!

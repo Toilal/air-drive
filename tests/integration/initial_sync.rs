@@ -1,10 +1,9 @@
-//! Integration tests for User Story 1 — initial sync (T025–T029).
+//! Integration tests for initial sync.
 //!
-//! These tests are written **before** the implementation tasks T030–T040 land and are
-//! expected to FAIL until then (per the TDD step in `tasks.md`). They exercise the
-//! `air-drive` binary end-to-end against the [`common::DriveMock`], with the rclone
-//! subprocess swapped for an in-process HTTP engine via the test env-var contract
-//! documented in `tests/integration/common/mod.rs`.
+//! These tests exercise the `air-drive` binary end-to-end against the
+//! [`common::DriveMock`], with the rclone subprocess swapped for an in-process
+//! HTTP engine via the test env-var contract documented in
+//! `tests/integration/common/mod.rs`.
 
 // Integration test setup is allowed to panic — there is no recovery path inside a test,
 // and surfacing setup failures loudly is the desired behaviour.
@@ -26,7 +25,7 @@ fn run(mut cmd: Command) -> (i32, String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// T025 — US1.1: `link` persists the account
+// `link` persists the account
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -54,7 +53,7 @@ async fn us1_1_link_persists_account() {
 }
 
 // ---------------------------------------------------------------------------
-// T026 — US1.2: `map` validates inputs and persists the mapping
+// `map` validates inputs and persists the mapping
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -99,10 +98,7 @@ async fn us1_2_map_rejects_missing_local_path_with_exit_4() {
         .arg("/nonexistent/path/that/should/not/exist/abcxyz")
         .arg(&root_id);
     let (code, _stdout, _stderr) = run(cmd);
-    assert_eq!(
-        code, 4,
-        "missing local path → exit 4 (per contracts/cli.md)"
-    );
+    assert_eq!(code, 4, "missing local path → exit 4");
 }
 
 #[tokio::test]
@@ -118,14 +114,11 @@ async fn us1_2_map_rejects_unresolvable_remote_with_exit_5() {
         .arg(&fx.local_dir)
         .arg("drv-dir-does-not-exist");
     let (code, _stdout, _stderr) = run(cmd);
-    assert_eq!(
-        code, 5,
-        "unresolvable remote folder → exit 5 (per contracts/cli.md)"
-    );
+    assert_eq!(code, 5, "unresolvable remote folder → exit 5");
 }
 
 // ---------------------------------------------------------------------------
-// T027 — US1.3: empty local, populated Drive, after initial-sync local mirrors Drive
+// empty local, populated Drive, after initial-sync local mirrors Drive
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -191,7 +184,7 @@ async fn us1_3_drive_to_local_initial_sync() {
 }
 
 // ---------------------------------------------------------------------------
-// T028 — US1.4: non-empty local, empty Drive, after initial-sync Drive mirrors local
+// non-empty local, empty Drive, after initial-sync Drive mirrors local
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -233,7 +226,7 @@ async fn us1_4_local_to_drive_initial_sync() {
 }
 
 // ---------------------------------------------------------------------------
-// T029 — US1.5: overlapping content (3 match by md5, 2 only local, 2 only remote)
+// overlapping content (3 match by md5, 2 only local, 2 only remote)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

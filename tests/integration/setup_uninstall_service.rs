@@ -1,14 +1,13 @@
-//! Integration coverage for `air-drive setup --uninstall-service` (feature 002).
+//! Integration coverage for `air-drive setup --uninstall-service`.
 //!
-//! Three user stories from `specs/002-uninstall-service-flag/spec.md`:
+//! Three scenarios:
 //!
-//! - US1 (P1) — happy path: unit present + `systemctl` works → file removed,
+//! - Happy path: unit present + `systemctl` works → file removed,
 //!   shim sees `disable --now` then `daemon-reload`, exit 0.
-//! - US2 (P2) — idempotent: nothing to remove → exit 0 with a clear message.
-//! - US3 (P3) — graceful: `systemctl` missing → warning, file still removed,
-//!   exit 0.
+//! - Idempotent: nothing to remove → exit 0 with a clear message.
+//! - Graceful: `systemctl` missing → warning, file still removed, exit 0.
 //!
-//! Plus the mutually-exclusive flag guard (FR-008).
+//! Plus the mutually-exclusive flag guard.
 //!
 //! The tests fake `systemctl` via a small shell-script shim on `$PATH` and
 //! redirect `$XDG_CONFIG_HOME` to a tempdir so the unit file location is

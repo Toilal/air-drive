@@ -1,4 +1,4 @@
-//! `air-drive resume` (T067, FR-015).
+//! `air-drive resume`.
 //!
 //! Same wire protocol as `pause`, just a different verb. On the daemon side
 //! `resume` flips the pause flag and the dispatcher's `wait_for_resume`

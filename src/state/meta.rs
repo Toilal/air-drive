@@ -22,11 +22,11 @@ use crate::error::Result;
 /// `quota`, `io`, etc.) live in the schema for future use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockedKind {
-    /// OAuth refresh failed — user must re-link (FR-009).
+    /// OAuth refresh failed — user must re-link.
     Auth,
-    /// Watched remote folder disappeared (FR-020).
+    /// Watched remote folder disappeared.
     Remote,
-    /// Watched local path missing or unreadable (FR-023).
+    /// Watched local path missing or unreadable.
     Mapping,
 }
 

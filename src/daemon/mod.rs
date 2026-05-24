@@ -1,10 +1,10 @@
 //! Daemon orchestration: event loop, single-instance lock, control socket, shutdown.
 //!
-//! The Phase 4 [`run`] entry point ties together the watcher, the change poller,
+//! The [`run`] entry point ties together the watcher, the change poller,
 //! the reconciler, and the op dispatcher behind a single
 //! [`tokio_util::sync::CancellationToken`]. SIGTERM / SIGINT both flip the
 //! token, the loops drain whatever's in flight, and the function returns
-//! cleanly. Tests use this to validate the continuous-sync user story (T041–T049).
+//! cleanly. Tests use this to validate the continuous-sync user story.
 
 pub mod in_flight;
 pub mod lock;
@@ -57,8 +57,7 @@ pub struct DaemonContext {
 /// Run the daemon's continuous sync loop until `cancel` fires (SIGTERM/SIGINT or
 /// an external trigger). Returns once every spawned task has drained.
 pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
-    // Pre-flight: clear any stale partial downloads from a previous crash
-    // (FR-010, T034b).
+    // Pre-flight: clear any stale partial downloads from a previous crash.
     staging::cleanup_orphans(&ctx.local_root)?;
 
     // Notifier the reconciler signals on every enqueue so the dispatcher

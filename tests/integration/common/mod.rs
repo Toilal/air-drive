@@ -18,7 +18,7 @@
 //! ## Test-only env-var contract
 //!
 //! The binary honours these overrides exclusively from integration tests. They are
-//! **not** part of the stable CLI contract (`contracts/cli.md`). Their names start with
+//! **not** part of the stable CLI contract. Their names start with
 //! `AIR_DRIVE_TEST_` precisely so they are conspicuous and easy to grep for.
 //!
 //! - `AIR_DRIVE_DRIVE_BASE_URL` — base URL for the Drive REST API (default
@@ -240,20 +240,19 @@ fn guess_mime(name: &str) -> &'static str {
 pub struct DriveMock {
     pub server: MockServer,
     pub state: Arc<Mutex<DriveState>>,
-    /// Decrement-and-fail counter for the 503 injection path (used by T049). Mounted
+    /// Decrement-and-fail counter for the 503 injection path. Mounted
     /// at higher wiremock priority than the real responders so a positive value
     /// short-circuits every request to `HTTP 503` until it hits zero.
     pub fail_budget: Arc<AtomicUsize>,
-    /// Always-on 401 flag, used by T063 (refresh-token revoked → daemon goes
-    /// `blocked`). Higher wiremock priority than the 503 gate so when both
-    /// fire, 401 wins.
+    /// Always-on 401 flag (refresh-token revoked → daemon goes `blocked`).
+    /// Higher wiremock priority than the 503 gate so when both fire, 401 wins.
     pub auth_failing: Arc<AtomicBool>,
 }
 
 impl DriveMock {
     /// Start the mock with a canned user email. Mounts every Drive endpoint the daemon
-    /// needs for US1 (initial sync). Continuous-sync endpoints are mounted as well so
-    /// the same mock can be reused by Phase 4 tests.
+    /// needs for the initial-sync user story. Continuous-sync endpoints are mounted as
+    /// well so the same mock can be reused by continuous-sync tests.
     pub async fn start() -> Self {
         let server = MockServer::start().await;
         let state = Arc::new(Mutex::new(DriveState::new("alice@example.com")));
@@ -261,8 +260,8 @@ impl DriveMock {
         let auth_failing = Arc::new(AtomicBool::new(false));
 
         // Top-priority gate: when `auth_failing` is set, every request answers
-        // 401 (T063 — refresh token revoked). Distinct from the 503 budget
-        // because auth failures aren't retried by the daemon; they flip the
+        // 401 (refresh token revoked). Distinct from the 503 budget because
+        // auth failures aren't retried by the daemon; they flip the
         // `state_meta.blocked_kind` flag. wiremock priority is "lower number
         // = higher precedence" but the minimum value it accepts is 1.
         Mock::given(AuthFailMatcher(auth_failing.clone()))
@@ -391,16 +390,15 @@ impl DriveMock {
     }
 
     /// Make the mock answer the next `n` HTTP requests with a `503 Service
-    /// Unavailable`. Subsequent requests fall through to the real handlers. Used by
-    /// the T049 test to simulate a transient Drive outage.
+    /// Unavailable`. Subsequent requests fall through to the real handlers. Used to
+    /// simulate a transient Drive outage.
     pub fn fail_next_n(&self, n: usize) {
         self.fail_budget.store(n, Ordering::Relaxed);
     }
 
     /// Flip the mock into "always 401" mode — every request answers
-    /// `401 Unauthorized` until [`stop_auth_failures`] flips it back. Used by
-    /// the T063 test to drive the daemon's `state_meta.blocked_kind = auth`
-    /// path (FR-009).
+    /// `401 Unauthorized` until [`stop_auth_failures`] flips it back. Used
+    /// to drive the daemon's `state_meta.blocked_kind = auth` path.
     pub fn start_auth_failures(&self) {
         self.auth_failing.store(true, Ordering::Relaxed);
     }
@@ -965,7 +963,7 @@ pub fn air_drive_cmd(fx: &FsFixture, mock: &DriveMock) -> StdCommand {
         .env("AIR_DRIVE_TEST_ENGINE", "http")
         // Default to "exit cleanly after initial-sync" so simple
         // Command::output() tests don't hang on the continuous loop. Tests that
-        // DO want the loop (Phase 4 / DaemonProcess) clear this env override.
+        // DO want the loop (DaemonProcess) clear this env override.
         .env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "1")
         .env("RUST_LOG", "info");
     cmd
@@ -982,7 +980,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Long-running daemon process (used by Phase 4 / US2 tests)
+// Long-running daemon process (used by continuous-sync tests)
 // ---------------------------------------------------------------------------
 
 /// Spawn-and-control wrapper around the `air-drive start` subprocess, for tests that
@@ -1001,7 +999,7 @@ impl DaemonProcess {
     /// (file present on Drive, etc.) via [`wait_until`].
     pub async fn spawn(fx: &FsFixture, mock: &DriveMock, extra_args: &[&str]) -> Self {
         let mut cmd: tokio::process::Command = air_drive_cmd(fx, mock).into();
-        // The daemon must enter the continuous loop for Phase 4 tests, so we
+        // The daemon must enter the continuous loop for continuous-sync tests, so we
         // override the "exit after initial-sync" default that `air_drive_cmd`
         // sets for the simpler initial_sync suite.
         cmd.env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "0");
@@ -1025,7 +1023,7 @@ impl DaemonProcess {
     }
 
     /// OS-level process id of the spawned daemon. Used by tests that assert
-    /// the lock-contention error message names the running PID (T064).
+    /// the lock-contention error message names the running PID.
     pub fn pid(&self) -> u32 {
         self.pid
     }

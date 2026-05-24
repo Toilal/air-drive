@@ -1,4 +1,4 @@
-//! Download staging — atomic rename + orphan cleanup (FR-010, T034b).
+//! Download staging — atomic rename + orphan cleanup.
 //!
 //! Both [`super::http::HttpEngine`] and [`super::rclone::RcloneEngine`] stage downloads
 //! into `<local_root>/.air-drive-partial/<op-id>` and only `rename(2)` them into the

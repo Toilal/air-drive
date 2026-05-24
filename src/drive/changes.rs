@@ -1,4 +1,4 @@
-//! Drive `changes.list` poller (T052).
+//! Drive `changes.list` poller.
 //!
 //! Long-lived task that wakes every `interval` seconds, fetches the delta since
 //! the last cursor, filters to descendants of the watched root, and emits
@@ -122,8 +122,8 @@ pub async fn run(
             Err(crate::error::Error::Oauth(msg)) => {
                 // OAuth refresh / 401 — persist the blocked flag so the
                 // status surface reports "re-link account" and stop polling
-                // until the user resolves it (FR-009). The dispatcher follows
-                // the same code path on the next op attempt.
+                // until the user resolves it. The dispatcher follows the same
+                // code path on the next op attempt.
                 tracing::error!(error = %msg, "auth failure on changes.list — daemon blocked");
                 let _ = crate::state::meta::set_blocked(
                     db.connection(),
@@ -163,14 +163,14 @@ pub async fn run(
             let removed = c.get("removed").and_then(|v| v.as_bool()).unwrap_or(false);
             let file = c.get("file").and_then(parse_snapshot);
 
-            // FR-020 / T070b — the watched remote folder itself was deleted on
-            // Drive. The daemon can't make further progress; flip to
+            // The watched remote folder itself was deleted on Drive. The
+            // daemon can't make further progress; flip to
             // `state_meta.blocked_kind = remote` and skip emitting this
             // change (no sync_item references the root).
             if removed && file_id == root_id {
                 tracing::error!(
                     folder = %root_id,
-                    "watched remote folder was trashed — daemon is now blocked (FR-020)"
+                    "watched remote folder was trashed — daemon is now blocked"
                 );
                 let _ = crate::state::meta::set_blocked(
                     db.connection(),

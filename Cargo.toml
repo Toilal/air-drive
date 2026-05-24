@@ -79,7 +79,7 @@ directories = "5"
 # RNG for jitter on retry backoff
 rand = "0.8"
 
-# Local file fingerprint (FR-007 — md5 against remote.md5Checksum)
+# Local file fingerprint (md5 against remote.md5Checksum)
 md-5 = "0.10"
 hex = "0.4"
 
@@ -104,8 +104,7 @@ hex = "0.4"
 # Auto-load `<repo>/.env` for local e2e runs so developers don't need to
 # `set -a; source .env; set +a` every shell. CI passes env vars directly.
 dotenvy = "0.15"
-# Validate the `status --json` output against `contracts/status.schema.json`
-# (Phase 5 / FR-008).
+# Validate the `status --json` output against `contracts/status.schema.json`.
 jsonschema = "0.28"
 
 # Integration tests live under tests/integration/ rather than at the default

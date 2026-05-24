@@ -1,9 +1,9 @@
 //! Clap CLI surface for the `air-drive` binary.
 //!
-//! Single source of truth for the user-visible commands documented in
-//! `contracts/cli.md`. Each subcommand resolves to one of [`Command`]'s variants and
-//! is dispatched via [`dispatch`]; the actual subcommand handlers live in sibling
-//! modules ([`link`], [`map`], [`start`], [`unlink`], [`setup`]).
+//! Single source of truth for the user-visible commands. Each subcommand resolves to
+//! one of [`Command`]'s variants and is dispatched via [`dispatch`]; the actual
+//! subcommand handlers live in sibling modules ([`link`], [`map`], [`start`],
+//! [`unlink`], [`setup`]).
 
 pub mod init;
 pub mod link;
@@ -53,25 +53,25 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// Every subcommand of `air-drive`. See `contracts/cli.md`.
+/// Every subcommand of `air-drive`.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Link a Google Drive account via the desktop OAuth flow (FR-001).
+    /// Link a Google Drive account via the desktop OAuth flow.
     Link {
         /// Human-friendly label stored alongside the account. Defaults to the
         /// captured email.
         #[arg(long, value_name = "LABEL")]
         account_label: Option<String>,
     },
-    /// Record the local↔remote folder mapping (FR-002).
+    /// Record the local↔remote folder mapping.
     Map {
-        /// Local folder path (created on the fly if missing — FR-002).
+        /// Local folder path (created on the fly if missing).
         local_path: PathBuf,
         /// Remote folder, one of: Drive file ID, Drive folder URL, or
         /// `path:My Drive/Sync` notation.
         remote_folder: String,
     },
-    /// Run the daemon in the foreground (FR-014, FR-017).
+    /// Run the daemon in the foreground.
     Start {
         /// Perform initial reconciliation if `drive_change_cursor` is empty.
         #[arg(long)]
@@ -80,18 +80,18 @@ pub enum Command {
         #[arg(long, value_name = "SECONDS")]
         remote_poll_interval: Option<u64>,
     },
-    /// Signal a running daemon to pause sync (FR-015).
+    /// Signal a running daemon to pause sync.
     Pause,
-    /// Signal a paused daemon to resume sync (FR-015).
+    /// Signal a paused daemon to resume sync.
     Resume,
-    /// Print the current daemon state (FR-008).
+    /// Print the current daemon state.
     Status {
         /// Emit JSON matching `contracts/status.schema.json` instead of the
         /// human-readable summary.
         #[arg(long)]
         json: bool,
     },
-    /// Remove the linked account, tokens, and mapping (FR-018, FR-019).
+    /// Remove the linked account, tokens, and mapping.
     Unlink {
         /// Skip the interactive confirmation prompt.
         #[arg(short = 'y', long)]
@@ -103,7 +103,7 @@ pub enum Command {
     /// unit and are mutually exclusive.
     Setup {
         /// Install the systemd user unit at
-        /// `~/.config/systemd/user/air-drive.service` and enable it (FR-014).
+        /// `~/.config/systemd/user/air-drive.service` and enable it.
         #[arg(long)]
         install_service: bool,
         /// Reverse `--install-service`: stop and disable the systemd user
@@ -127,7 +127,7 @@ pub enum Command {
     },
 }
 
-/// Exit codes documented in `contracts/cli.md`.
+/// Exit codes documented in the README.
 #[derive(Debug, Clone, Copy)]
 #[repr(i32)]
 pub enum ExitCode {
@@ -135,7 +135,7 @@ pub enum ExitCode {
     Ok = 0,
     /// Uncaught error.
     GenericError = 1,
-    /// OAuth error during `link` (FR-001).
+    /// OAuth error during `link`.
     OauthError = 2,
     /// Network failure during `link`.
     NetworkError = 3,
@@ -143,7 +143,7 @@ pub enum ExitCode {
     MapLocalInvalid = 4,
     /// Remote folder supplied to `map` cannot be resolved.
     MapRemoteUnresolvable = 5,
-    /// Single-instance lock held by another live daemon (FR-017).
+    /// Single-instance lock held by another live daemon.
     LockHeld = 6,
     /// `pause` / `resume` invoked but no running daemon found.
     NoDaemonRunning = 7,
@@ -305,8 +305,8 @@ mod tests {
 
     #[test]
     fn exit_code_values_match_contract() {
-        // Frozen by contracts/cli.md — anything that doesn't match here breaks the
-        // documented stability promise.
+        // Frozen contract — anything that doesn't match here breaks the documented
+        // stability promise.
         assert_eq!(ExitCode::Ok as i32, 0);
         assert_eq!(ExitCode::GenericError as i32, 1);
         assert_eq!(ExitCode::OauthError as i32, 2);

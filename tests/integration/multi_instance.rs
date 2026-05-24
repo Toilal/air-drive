@@ -1,4 +1,4 @@
-//! `air-drive start` single-instance enforcement (T064, FR-017).
+//! `air-drive start` single-instance enforcement.
 //!
 //! Once a daemon is up against a given config dir, a second `start` against
 //! the same config dir MUST exit with code 6 and surface the running PID in

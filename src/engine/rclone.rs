@@ -14,7 +14,7 @@
 //! Subcommands:
 //!
 //! - **upload**: `rclone copyto <local> airdrive:<parent_id>/<name> --drive-root-folder-id <parent_id>`
-//! - **download**: stages via [`super::staging`] then `rclone copyto airdrive:<id> <stage>` (FR-010)
+//! - **download**: stages via [`super::staging`] then `rclone copyto airdrive:<id> <stage>`
 //! - **move_remote**: `rclone moveto airdrive:<old_id> airdrive:<new_parent>/<new_name>`
 //! - **delete_remote**: `rclone delete airdrive:<id>` (Drive trash)
 //!
@@ -38,7 +38,7 @@ use crate::error::{Error, Result};
 
 /// Where the `rclone` binary the engine drives came from. Surfaced via
 /// `air-drive status --json` under `rclone.source` so the user can audit which binary
-/// is actually in use (cf. `research.md §5`).
+/// is actually in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RcloneSource {
     /// `[rclone].path` from `config.toml`.

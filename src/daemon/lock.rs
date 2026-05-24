@@ -1,4 +1,4 @@
-//! Single-instance file lock for the daemon (FR-017).
+//! Single-instance file lock for the daemon.
 //!
 //! The lock uses BSD-style `flock(2)` semantics via the [`nix`] crate. Locks are held
 //! by the open file description, so two opens of `<config_dir>/lock` in the same

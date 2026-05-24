@@ -1,10 +1,10 @@
-//! `air-drive link` (T037, FR-001).
+//! `air-drive link`.
 //!
 //! Walks the user through the OAuth dance, captures the linked user's primary email
 //! via Drive's `about.user`, and persists an `account` row. Idempotent — re-running
 //! refreshes the `linked_at` timestamp.
 //!
-//! Exit codes (per `contracts/cli.md`):
+//! Exit codes:
 //!
 //! - `0` — success.
 //! - `2` — OAuth error (refused, revoked, invalid `client_id`).

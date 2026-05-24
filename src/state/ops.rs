@@ -18,7 +18,7 @@ pub struct OpId(pub i64);
 pub enum Operation {
     /// Send the local file to Drive.
     Upload,
-    /// Fetch the remote file locally (via the staging dir, FR-010).
+    /// Fetch the remote file locally (via the staging dir).
     Download,
     /// Delete the local file.
     DeleteLocal,
@@ -174,8 +174,7 @@ pub async fn delete(conn: &Connection, id: OpId) -> Result<()> {
     .map_err(Into::into)
 }
 
-/// Count pending operations grouped by [`Operation`] — used by the status command
-/// (FR-008).
+/// Count pending operations grouped by [`Operation`] — used by the status command.
 pub async fn count_by_op(conn: &Connection) -> Result<HashMap<Operation, i64>> {
     conn.call(|c| {
         let mut stmt = c.prepare("SELECT op, COUNT(*) FROM pending_operation GROUP BY op")?;

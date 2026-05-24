@@ -1,16 +1,16 @@
 //! Reconciler: turn watcher + remote-change events into atomic `SyncEngine` operations.
 //!
-//! For the MVP only the **initial** reconciliation pass lives here (T036). It walks
+//! For the MVP only the **initial** reconciliation pass lives here. It walks
 //! the local tree and the remote tree once, classifies every leaf as `local-only`,
 //! `remote-only`, or `both`, and dispatches `upload` / `download` to the configured
 //! [`SyncEngine`] until the queue drains. After convergence it captures a Drive
-//! `changes.getStartPageToken` baseline so the continuous-sync loop (Phase 4) only
-//! sees events that happened *after* the initial pass.
+//! `changes.getStartPageToken` baseline so the continuous-sync loop only sees
+//! events that happened *after* the initial pass.
 //!
 //! Conflict handling on `both` files is intentionally minimal at this stage: if the
 //! md5 matches we just record the pair in `sync_item`; if it doesn't, we log and
-//! defer the divergence to the Phase 4 conflict path (FR-006). T029 in the
-//! integration suite covers the md5-match shortcut.
+//! defer the divergence to the continuous-sync conflict path. The integration suite
+//! covers the md5-match shortcut.
 
 pub mod conflict;
 pub mod continuous;
@@ -89,7 +89,7 @@ pub async fn initial(
 
     // 1. Local-only files → upload (creating remote parent folders as needed).
     //    Files matching by md5 (in_both with equal fingerprint) are recorded but NOT
-    //    re-uploaded — that's the assertion T029 exercises.
+    //    re-uploaded.
     for local in &local_files {
         let local_path = local_root.join(&local.relative_path);
         let (size, md5) = fingerprint::compute_local(&local_path).await?;
@@ -111,7 +111,7 @@ pub async fn initial(
                         relative_path = %local.relative_path,
                         local_md5 = %md5,
                         remote_md5 = ?remote.md5,
-                        "fingerprint mismatch on both-sides file — deferring to Phase 4 conflict handler"
+                        "fingerprint mismatch on both-sides file — deferring to continuous-sync conflict handler"
                     );
                 }
             }
@@ -209,7 +209,7 @@ fn collect_local(root: &Path, dir: &Path, out: &mut Vec<LocalEntry>) -> Result<(
                 is_dir: false,
             });
         }
-        // Symlinks and special files: skipped silently (FR-013).
+        // Symlinks and special files: skipped silently.
     }
     Ok(())
 }

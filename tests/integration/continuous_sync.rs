@@ -1,10 +1,8 @@
-//! Integration tests for User Story 2 — continuous bidirectional sync (T041–T049).
+//! Integration tests for continuous bidirectional sync.
 //!
-//! These tests are written before the watcher / change-poller / dispatcher / daemon
-//! loop land (T050–T058) and are expected to FAIL until then. They exercise the
-//! `air-drive` binary's `start` command (without `--initial-sync` because the
-//! cursor is pre-seeded) and assert that on-going edits flow through both directions
-//! within the latency targets the spec promises.
+//! These tests exercise the `air-drive` binary's `start` command (without
+//! `--initial-sync` because the cursor is pre-seeded) and assert that on-going
+//! edits flow through both directions within the latency targets.
 //!
 //! Convention: every test stages the daemon-runs-against-already-converged state by
 //! seeding `account`, `folder_mapping`, `drive_change_cursor`, and `sync_item` rows
@@ -25,7 +23,7 @@ const T_REMOTE_TO_LOCAL: Duration = Duration::from_secs(60);
 const T_RECOVERY: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
-// T041 — local create propagates to Drive
+// local create propagates to Drive
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -59,7 +57,7 @@ async fn us2_1_local_create_propagates() {
 }
 
 // ---------------------------------------------------------------------------
-// T042 — local modify propagates (md5 changes on Drive)
+// local modify propagates (md5 changes on Drive)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -107,7 +105,7 @@ async fn us2_1_local_modify_propagates() {
 }
 
 // ---------------------------------------------------------------------------
-// T043 — local delete propagates
+// local delete propagates
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -150,7 +148,7 @@ async fn us2_1_local_delete_propagates() {
 }
 
 // ---------------------------------------------------------------------------
-// T044 — local rename propagates via `moveto`, NOT a re-upload
+// local rename propagates via `moveto`, NOT a re-upload
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -201,14 +199,14 @@ async fn us2_3_local_rename_uses_moveto_not_reupload() {
     let uploads_after = mock.upload_count().await;
     assert_eq!(
         uploads_after, uploads_before,
-        "a rename MUST NOT trigger files.create — that would re-upload the bytes (FR-005). \
+        "a rename MUST NOT trigger files.create — that would re-upload the bytes. \
          before={uploads_before}, after={uploads_after}"
     );
     daemon.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
-// T045 — moving a file across subfolders propagates
+// moving a file across subfolders propagates
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -262,7 +260,7 @@ async fn us2_4_subfolder_move_propagates() {
 }
 
 // ---------------------------------------------------------------------------
-// T046 — remote create propagates locally
+// remote create propagates locally
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -294,7 +292,7 @@ async fn us2_2_remote_create_propagates_locally() {
 }
 
 // ---------------------------------------------------------------------------
-// T046b — nested remote create propagates to the matching local subfolder
+// nested remote create propagates to the matching local subfolder
 // (regression: the poller used to flatten the path to `<file_name>` instead
 // of walking the parent chain back to the watched root)
 // ---------------------------------------------------------------------------
@@ -338,7 +336,7 @@ async fn us2_2_nested_remote_create_propagates_with_full_path() {
 }
 
 // ---------------------------------------------------------------------------
-// T047 — remote modify propagates locally
+// remote modify propagates locally
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -394,7 +392,7 @@ async fn us2_2_remote_modify_propagates_locally() {
 }
 
 // ---------------------------------------------------------------------------
-// T048 — remote delete propagates locally
+// remote delete propagates locally
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -444,7 +442,7 @@ async fn us2_2_remote_delete_propagates_locally() {
 }
 
 // ---------------------------------------------------------------------------
-// T049 — network drop, events queue, queue drains on recovery
+// network drop, events queue, queue drains on recovery
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

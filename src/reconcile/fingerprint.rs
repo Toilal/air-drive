@@ -1,9 +1,9 @@
-//! Content fingerprints (T035, FR-007).
+//! Content fingerprints.
 //!
 //! The reconciler compares local files to remote files via `(size, md5)`. Drive
 //! returns `md5Checksum` for every regular file but **not** for native Google Docs;
-//! those are filtered out earlier (FR-011) so [`from_remote`] returning `None` for
-//! them is treated as "skip — out of MVP scope".
+//! those are filtered out earlier so [`from_remote`] returning `None` for them is
+//! treated as "skip — out of MVP scope".
 //!
 //! [`compute_local`] streams the file from disk so we never load >64 KiB into RAM —
 //! important for the 100 MB test bound and for later use on bigger files.
@@ -37,7 +37,7 @@ pub async fn compute_local(path: &Path) -> Result<(i64, String)> {
 }
 
 /// `(size, md5)` extracted from a [`RemoteFile`]. Returns `None` if the remote didn't
-/// expose an MD5 (e.g. native Google Docs) — caller should skip such files (FR-011).
+/// expose an MD5 (e.g. native Google Docs) — caller should skip such files.
 pub fn from_remote(file: &RemoteFile) -> Option<(i64, String)> {
     file.md5.as_ref().map(|md5| (file.size, md5.clone()))
 }

@@ -1,8 +1,8 @@
-//! `air-drive status [--json]` integration tests (T059, T060).
+//! `air-drive status [--json]` integration tests.
 //!
-//! Today we cover only T059 — schema validation. T060 (counts mid-sync +
-//! last error surface) requires a control socket the daemon doesn't expose
-//! yet (Phase 5b); a follow-up batch lands it.
+//! Today we cover only schema validation. Counts mid-sync and the last-error
+//! surface require a control socket the daemon doesn't expose yet; a follow-up
+//! batch lands it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -36,7 +36,7 @@ fn load_schema() -> Validator {
     Validator::new(&schema_json).expect("schema compiles")
 }
 
-/// T059 — `air-drive status --json` emits a document that validates against
+/// `air-drive status --json` emits a document that validates against
 /// the contract schema, both before a daemon has linked and after a full
 /// sync state is in place.
 #[tokio::test]

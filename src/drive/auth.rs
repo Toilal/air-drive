@@ -1,4 +1,4 @@
-//! OAuth / token acquisition for the Drive API (FR-001, FR-016).
+//! OAuth / token acquisition for the Drive API.
 //!
 //! Two implementations of [`TokenProvider`] live in this module:
 //!
@@ -13,7 +13,7 @@
 //!   `Config.oauth.client_id` + `Config.oauth.client_secret`.
 //!
 //! Token storage lives at `<config_dir>/tokens.json`. The file MUST be `0600` — the
-//! factory refuses to start otherwise (FR-016 in `spec.md`).
+//! factory refuses to start otherwise.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -32,13 +32,12 @@ use crate::error::{Error, Result};
 /// distributed client_id is safe (RFC 7636). Users who prefer their own GCP project
 /// override this via `Config.oauth.client_id`.
 ///
-/// **MVP placeholder**: replace before the first public release. Tracked in
-/// `specs/001-minimal-sync-daemon/research.md` decision §3.
+/// **MVP placeholder**: replace before the first public release.
 pub const EMBEDDED_CLIENT_ID: &str = "REPLACE_BEFORE_RELEASE.apps.googleusercontent.com";
 
 /// Drive scopes requested by the daemon. `drive.file` covers everything we create or
 /// open; `drive.metadata.readonly` lets `about.user` and `files.list` work for the
-/// initial discovery (FR-001 + FR-002 in `spec.md`).
+/// initial discovery.
 pub const DRIVE_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive.metadata.readonly",

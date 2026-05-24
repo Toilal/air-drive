@@ -1,6 +1,6 @@
 //! Resolve which `rclone` binary the daemon should drive.
 //!
-//! Resolution order, per `specs/001-minimal-sync-daemon/research.md §5`:
+//! Resolution order:
 //!
 //! 1. **`[rclone].path` from config** — an explicit override always wins. The version
 //!    probe still runs so we can refuse outright-broken binaries.
@@ -15,7 +15,7 @@
 //!
 //! Each successful step yields an [`RcloneBinary`] carrying the source (so
 //! `air-drive status --json` can report it) and the version string (informational for
-//! diagnostics; min-version gating is intentionally lax — see research §5).
+//! diagnostics; min-version gating is intentionally lax).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

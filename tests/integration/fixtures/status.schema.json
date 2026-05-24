@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://air-drive.dev/schemas/status.v1.json",
   "title": "air-drive status output (v1)",
-  "description": "Schema for `air-drive status --json` output. The contract for FR-008.",
+  "description": "Schema for `air-drive status --json` output.",
   "type": "object",
   "required": ["schema_version", "state", "pending", "last_sync", "conflicts"],
   "additionalProperties": false,
@@ -66,7 +66,7 @@
         "kind": {
           "type": "string",
           "enum": ["transient", "auth", "quota", "io", "remote", "mapping", "config", "internal"],
-          "description": "auth = OAuth refresh hard-fail (FR-009); remote = watched remote folder gone (FR-020); mapping = watched local path missing (FR-023); transient = retry-eligible (FR-012); quota = API rate limit reached; io = local filesystem error (FR-021); config = invalid configuration (e.g. bad OAuth client_id override); internal = unexpected daemon-side error."
+          "description": "auth = OAuth refresh hard-fail; remote = watched remote folder gone; mapping = watched local path missing; transient = retry-eligible; quota = API rate limit reached; io = local filesystem error; config = invalid configuration (e.g. bad OAuth client_id override); internal = unexpected daemon-side error."
         }
       }
     },
@@ -99,7 +99,7 @@
         "source": {
           "type": "string",
           "enum": ["config", "path", "cache", "downloaded"],
-          "description": "Where the binary came from. See research.md §5."
+          "description": "Where the binary came from."
         }
       }
     }

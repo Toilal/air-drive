@@ -16,9 +16,9 @@ use air_drive::engine::rclone_path;
 use air_drive::observability::init_tracing;
 
 fn main() -> StdExitCode {
-    // T079 — intercept `--version` / `-V` before clap so we can append the
-    // resolved rclone version. clap's default `version` would just print the
-    // crate version on its own.
+    // Intercept `--version` / `-V` before clap so we can append the resolved
+    // rclone version. clap's default `version` would just print the crate
+    // version on its own.
     if std::env::args()
         .skip(1)
         .any(|a| a == "--version" || a == "-V")

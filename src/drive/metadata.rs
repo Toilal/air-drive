@@ -6,12 +6,12 @@
 //!
 //! What lives here vs. elsewhere:
 //!
-//! - **Here**: `about.user` (FR-001 — capture email), `files.get`/`files.list`
-//!   (resolve folders, build directory trees), and `resolve_path` — the spec's
-//!   contract on `map`'s `<remote-folder>` argument (Drive ID, `path:` notation, or
+//! - **Here**: `about.user` (capture email), `files.get`/`files.list`
+//!   (resolve folders, build directory trees), and `resolve_path` — the contract
+//!   on `map`'s `<remote-folder>` argument (Drive ID, `path:` notation, or
 //!   `https://drive.google.com/...` URL).
 //! - **Elsewhere**: HTTP plumbing → [`super::http`]; OAuth / bearers → [`super::auth`];
-//!   `changes.list` polling → `drive::changes` (T052, Phase 4).
+//!   `changes.list` polling → `drive::changes`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -182,7 +182,7 @@ pub async fn create_folder(http: &DriveHttp, parent_id: &str, name: &str) -> Res
     meta_from_json(&v)
 }
 
-/// Resolve the `<remote-folder>` argument of `air-drive map` (FR-002, `contracts/cli.md`):
+/// Resolve the `<remote-folder>` argument of `air-drive map`:
 ///
 /// - bare ID like `0AIQ...` or `1aBcDef-` → returned as-is after a `files.get` check
 /// - URL like `https://drive.google.com/drive/folders/<id>` → ID extracted then verified

@@ -37,14 +37,14 @@ pub enum Error {
         stderr: String,
     },
 
-    /// Single-instance lock is held by another live daemon (FR-017 → CLI exit code 6).
+    /// Single-instance lock is held by another live daemon (CLI exit code 6).
     #[error("another daemon is already running (pid {pid:?})")]
     Lock {
         /// PID of the running daemon if it could be read from the lock file.
         pid: Option<u32>,
     },
 
-    /// Folder mapping problem: missing local path, unresolvable remote, etc. (FR-023).
+    /// Folder mapping problem: missing local path, unresolvable remote, etc.
     #[error("mapping error: {0}")]
     Mapping(String),
 
@@ -52,7 +52,7 @@ pub enum Error {
     #[error("TOML error: {0}")]
     Toml(String),
 
-    /// File permissions are too loose (FR-016 — tokens MUST be `0600`).
+    /// File permissions are too loose (tokens MUST be `0600`).
     #[error("file {path} has insecure permissions: got {got:o}, want {want:o}")]
     InsecurePermissions {
         /// Offending file.

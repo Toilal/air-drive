@@ -29,7 +29,7 @@ pub struct RemoteFile {
     /// Size in bytes.
     pub size: i64,
     /// Hex MD5 if the remote exposes it. Native Google Docs return `None` here, and
-    /// per FR-011 those are skipped before they ever reach the engine.
+    /// are skipped before they ever reach the engine.
     pub md5: Option<String>,
 }
 
@@ -49,7 +49,7 @@ pub enum Op {
         name: String,
     },
     /// Fetch a remote file to `local` (the engine must stage to a temporary location
-    /// and atomically rename into place — FR-010, enforced by `RcloneEngine`).
+    /// and atomically rename into place, enforced by `RcloneEngine`).
     Download {
         /// Drive file ID to fetch.
         remote_id: String,
@@ -86,14 +86,14 @@ pub trait SyncEngine: Send + Sync + 'static {
 
     /// Fetch a Drive file to a local path. The implementation MUST stage the bytes
     /// under `<local_root>/.air-drive-partial/<op-id>` and atomically rename into
-    /// `local` only after the bytes are fully written (FR-010, T034b). `local_root`
+    /// `local` only after the bytes are fully written. `local_root`
     /// is the watched folder root — passing it explicitly means staged downloads of
     /// nested files (`dir/sub/file.txt`) still land in the single root-level
     /// `.air-drive-partial/` rather than scattered through the tree where the
     /// orphan-sweep can't find them on the next start-up.
     async fn download(&self, remote_id: &str, local: &Path, local_root: &Path) -> Result<()>;
 
-    /// Move and/or rename a remote file. Used for FR-005 (no re-upload on rename).
+    /// Move and/or rename a remote file (no re-upload on rename).
     async fn move_remote(&self, remote_id: &str, new_parent_id: &str, new_name: &str)
     -> Result<()>;
 
