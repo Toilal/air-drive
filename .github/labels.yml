@@ -80,6 +80,10 @@
   color: "1d76db"
   description: "Tauri front-end and tray UI (future)."
 
+- name: area/desktop-integration
+  color: "1d76db"
+  description: "OS shell hooks — file manager overlay icons, context menus, native notifications, autostart."
+
 - name: area/docs
   color: "1d76db"
   description: "README, CLAUDE.md, doc-comments, examples."
