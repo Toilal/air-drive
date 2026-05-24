@@ -1,11 +1,12 @@
 # GitHub issue labels for air-drive.
 #
-# This file is the source of truth for the repo's labels. There is no
-# auto-sync workflow — apply changes manually with the `gh` CLI:
+# This file is the source of truth for the repo's labels. The
+# `.github/workflows/labels.yml` workflow syncs any change to this file
+# (on push to `main`) into the repo's actual label set — including
+# deletions, so a label removed here disappears on GitHub.
 #
-#     gh label create "<name>" --color "<color>" --description "<description>"
-#     gh label edit   "<name>" --color "<color>" --description "<description>"
-#     gh label delete "<name>" --yes
+# To preview without applying: run the `Sync labels` workflow manually
+# from the Actions tab with `dry-run = true`.
 #
 # Colors are 6-char hex without the leading `#`. Keep this file sorted by
 # section, then by priority/weight inside each section.
