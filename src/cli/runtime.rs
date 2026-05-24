@@ -32,8 +32,28 @@ pub fn resolve_paths(config_dir_override: Option<&Path>) -> Result<Paths> {
 }
 
 /// Load `config.toml` from the resolved config dir. Missing file → defaults.
+///
+/// Runs the surgical schema migration first ([`crate::config::migrate`]):
+/// any field present in the current `Config` schema but missing from the
+/// on-disk file is inserted with its default value and a descriptive
+/// comment, leaving the rest of the file (user comments, key order,
+/// overrides) untouched. The strict `deny_unknown_fields` load happens
+/// after migration so freshly-added fields are recognised on the very
+/// same startup.
 pub fn load_config(paths: &Paths) -> Result<Config> {
-    Config::load(&paths.config().join("config.toml"))
+    let path = paths.config().join("config.toml");
+    let report = crate::config::migrate::migrate_on_disk(&path)?;
+    if report.changed() {
+        for (section, key) in &report.inserted {
+            tracing::info!(
+                section = %section,
+                key = %key,
+                path = %path.display(),
+                "config.toml: inserted missing field with default value"
+            );
+        }
+    }
+    Config::load(&path)
 }
 
 /// Open the SQLite state DB at `<config_dir>/state.db`, running pragmas + migrations.

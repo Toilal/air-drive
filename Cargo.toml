@@ -70,8 +70,11 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # `air-drive start` accidentally racing).
 nix = { version = "0.29", features = ["fs", "signal"] }
 
-# TOML config
+# TOML config — `toml` for typed serde load/save, `toml_edit` for the
+# format-preserving config.toml migration step that keeps user comments and
+# overrides intact when new fields are introduced.
 toml = "0.8"
+toml_edit = { version = "0.22", features = ["serde"] }
 
 # XDG path resolution
 directories = "5"

@@ -11,6 +11,7 @@
 //!
 //! Every section is optional; a missing file is equivalent to `Config::default()`.
 
+pub mod migrate;
 pub mod paths;
 
 use std::path::Path;
