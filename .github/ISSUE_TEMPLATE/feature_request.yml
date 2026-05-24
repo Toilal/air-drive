@@ -1,0 +1,59 @@
+name: ✨ Feature request
+description: Suggest a new feature or improvement for air-drive.
+title: "[feat] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please describe the **problem**
+        first and the **solution** second — it makes prioritisation much easier.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 🎯 Problem / user need
+      description: What can you not do today? Avoid jumping to a solution here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 💡 Proposed solution
+      description: What should air-drive do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 🔀 Alternatives considered
+      description: Other approaches you thought about, and why you discarded them.
+
+  - type: checkboxes
+    id: constitution
+    attributes:
+      label: 📜 Constitution fit
+      description: Tick what applies — helps maintainers triage faster. Skip what you're unsure of.
+      options:
+        - label: Compatible with event-driven sync (no reliance on periodic polling as the primary mode).
+        - label: Any new dependency is Apache-2.0-compatible (MIT/BSD/ISC/MPL-2.0/Apache-2.0).
+        - label: Works across Linux, macOS, and Windows (or has a documented platform fallback).
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: 🤝 Willing to contribute a PR?
+      options:
+        - "Yes"
+        - "Maybe — with guidance"
+        - "No"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 💬 Additional context
+      description: Screenshots, links to similar features in other tools, related issues…

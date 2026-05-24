@@ -1,0 +1,138 @@
+name: 🐛 Bug report
+description: Report a bug in the air-drive daemon, CLI, or sync engine.
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Sync bugs are hard to
+        diagnose without environment context — please fill in as much detail as
+        you can.
+
+  - type: input
+    id: airdrive-version
+    attributes:
+      label: 📦 air-drive version
+      description: Output of `air-drive --version`.
+      placeholder: "air-drive 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: rclone-version
+    attributes:
+      label: 🔧 rclone version
+      description: First line of `rclone version`.
+      placeholder: "rclone v1.65.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 💻 Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: 🧬 Kernel / distro
+      description: e.g. `uname -a` on Linux/macOS, or Windows build number.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: filesystem
+    attributes:
+      label: 🗂️ Filesystem of the watched folder
+      description: Critical — inotify and equivalents behave very differently across filesystems.
+      options:
+        - ext4
+        - btrfs
+        - xfs
+        - zfs
+        - APFS
+        - NTFS
+        - NFS
+        - FUSE (sshfs, rclone mount, …)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: drive-scope
+    attributes:
+      label: ☁️ Drive scope involved
+      options:
+        - My Drive
+        - Shared Drive
+        - Shared with me
+        - Mixed
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 📝 What happened
+      description: Describe the action you took.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: ✅ Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: ❌ Actual behaviour
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: 🔁 Reproducibility
+      options:
+        - Always
+        - Sometimes
+        - Once
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 📜 Daemon logs
+      description: |
+        Run with `air-drive --debug` (or `RUST_LOG=debug`) and paste the
+        relevant excerpt. Avoid truncating timestamps.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: 🔒 Redaction confirmation
+      options:
+        - label: I redacted OAuth access tokens, refresh tokens, and any sensitive file contents from the logs and attachments above.
+          required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 💬 Additional context
+      description: Anything else — redacted `config.toml` excerpts, screenshots, related issues…
