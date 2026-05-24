@@ -64,13 +64,9 @@
   color: "1d76db"
   description: "src/watch — notify watcher, debounce, ignore patterns."
 
-- name: area/drive-api
+- name: area/sync
   color: "1d76db"
-  description: "src/drive — OAuth, HTTP client, changes.list poller, metadata."
-
-- name: area/engine
-  color: "1d76db"
-  description: "src/engine — SyncEngine trait, RcloneEngine, staging."
+  description: "src/drive + src/engine — OAuth, Drive HTTP/changes poller, SyncEngine, rclone, staging."
 
 - name: area/reconcile
   color: "1d76db"
