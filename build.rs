@@ -46,9 +46,7 @@ fn compose_version() -> String {
     // Fast path: HEAD sits exactly on a tag AND the working tree is clean →
     // emit the tag (sans `v` prefix). Any uncommitted change disqualifies the
     // build from masquerading as the tagged release.
-    if !dirty
-        && let Some(tag) = git(&["describe", "--tags", "--exact-match", "HEAD"])
-    {
+    if !dirty && let Some(tag) = git(&["describe", "--tags", "--exact-match", "HEAD"]) {
         return tag.trim_start_matches('v').to_string();
     }
 
@@ -73,7 +71,7 @@ fn compose_version() -> String {
 /// ignores any pre-release / build metadata suffix on the input.
 fn bump_patch(v: &str) -> Option<String> {
     // Slice off anything past `-` or `+` (pre-release / build metadata).
-    let core_end = v.find(|c: char| c == '-' || c == '+').unwrap_or(v.len());
+    let core_end = v.find(['-', '+']).unwrap_or(v.len());
     let core = &v[..core_end];
     let mut parts = core.split('.');
     let major: u64 = parts.next()?.parse().ok()?;

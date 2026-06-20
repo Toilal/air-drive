@@ -51,7 +51,7 @@ pub struct OauthConfig {
 }
 
 /// Folder mapping display info. The authoritative `remote_folder_id` lives in `state.db`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MappingConfig {
     /// Absolute path of the watched local folder, for display.
@@ -66,16 +66,6 @@ pub struct MappingConfig {
     /// applies to `path:` notation — bare IDs and URLs reference a specific
     /// resource that cannot be synthesised.
     pub auto_create_remote_root: bool,
-}
-
-impl Default for MappingConfig {
-    fn default() -> Self {
-        Self {
-            local_path: None,
-            remote_folder_name: None,
-            auto_create_remote_root: false,
-        }
-    }
 }
 
 /// Daemon runtime tuning.
