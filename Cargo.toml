@@ -46,6 +46,11 @@ serde_with = "3"
 # Google OAuth (PKCE flow for desktop apps)
 yup-oauth2 = "11"
 
+# Date/time — only used to format the OAuth access-token expiry as RFC 3339 for the
+# token JSON handed to rclone (so rclone can self-refresh during long transfers).
+# Already in the tree transitively via yup-oauth2; pinned here to use it directly.
+time = { version = "0.3", features = ["formatting"] }
+
 # Embedded SQLite (async wrapper + the underlying rusqlite for params! and types)
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio-rusqlite = "0.5"

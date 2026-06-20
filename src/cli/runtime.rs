@@ -94,6 +94,7 @@ pub async fn build_engine(
         binary,
         token_provider,
         cfg.oauth.client_id.clone(),
+        cfg.oauth.client_secret.clone(),
         local_root,
         http.clone(),
     )))

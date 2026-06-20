@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use time::OffsetDateTime;
 use yup_oauth2::{ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
 use crate::config::OauthConfig;
@@ -48,6 +49,22 @@ pub const DRIVE_SCOPES: &[&str] = &["https://www.googleapis.com/auth/drive"];
 /// File name of the OAuth token cache inside the config directory.
 pub const TOKENS_FILE: &str = "tokens.json";
 
+/// Full set of credentials rclone needs to **self-refresh** the access token
+/// during a single long-running operation (one that outlives the ~1 h token
+/// lifetime). The daemon's own HTTP client only needs the access token; rclone,
+/// as a separate process, needs the refresh token + client credentials too.
+#[derive(Debug, Clone)]
+pub struct RcloneToken {
+    /// Current access token (no `Bearer ` prefix).
+    pub access_token: String,
+    /// Refresh token, when one is available. `None` means rclone cannot
+    /// self-refresh — only the access token's remaining lifetime is usable.
+    pub refresh_token: Option<String>,
+    /// Access-token expiry as an RFC 3339 timestamp, when known. `None` lets the
+    /// caller fall back to a far-future placeholder (the legacy behaviour).
+    pub expiry_rfc3339: Option<String>,
+}
+
 /// Async provider of a fresh OAuth bearer token. Implementations MUST handle refresh
 /// internally so callers always receive a valid (non-expired) token.
 #[async_trait::async_trait]
@@ -55,6 +72,18 @@ pub trait TokenProvider: Send + Sync {
     /// Return a usable access token. The returned string SHOULD NOT include the
     /// `Bearer ` prefix — that's added by the HTTP layer.
     async fn token(&self) -> Result<String>;
+
+    /// Return the credential bundle rclone needs to self-refresh. The default
+    /// returns just the access token (no refresh token, no expiry), which keeps
+    /// the legacy single-token behaviour for providers — like [`StaticToken`] —
+    /// that have nothing more to offer.
+    async fn rclone_token(&self) -> Result<RcloneToken> {
+        Ok(RcloneToken {
+            access_token: self.token().await?,
+            refresh_token: None,
+            expiry_rfc3339: None,
+        })
+    }
 }
 
 /// Constant-string token provider. Used in tests via `AIR_DRIVE_TEST_BEARER_TOKEN`
@@ -75,22 +104,92 @@ impl TokenProvider for StaticToken {
     }
 }
 
-/// Boxed async fetcher returning a fresh access token on each call. Used to hide the
-/// concrete `Authenticator<C>` generic from callers — we don't want hyper-util/
+/// A freshly fetched access token plus its expiry, as returned by yup-oauth2.
+struct AccessAndExpiry {
+    access_token: String,
+    expiry: Option<OffsetDateTime>,
+}
+
+/// Boxed async fetcher returning a fresh access token (+ expiry) on each call. Used to
+/// hide the concrete `Authenticator<C>` generic from callers — we don't want hyper-util/
 /// hyper-rustls types leaking through our public surface.
-type Fetcher = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
+type Fetcher =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<AccessAndExpiry>> + Send>> + Send + Sync>;
 
 /// yup-oauth2-backed provider. The token fetch is wrapped in a `Box<dyn Fn ...>` so
 /// the connector type (`HttpsConnector<HttpConnector>` from hyper-util) stays internal.
 pub struct YupOAuthProvider {
     fetcher: Fetcher,
+    /// Path to `tokens.json`, read to recover the refresh token for rclone.
+    tokens_path: PathBuf,
 }
 
 #[async_trait::async_trait]
 impl TokenProvider for YupOAuthProvider {
     async fn token(&self) -> Result<String> {
-        (self.fetcher)().await
+        Ok((self.fetcher)().await?.access_token)
     }
+
+    async fn rclone_token(&self) -> Result<RcloneToken> {
+        let AccessAndExpiry {
+            access_token,
+            expiry,
+        } = (self.fetcher)().await?;
+        let expiry_rfc3339 = match expiry {
+            Some(dt) => Some(
+                dt.format(&time::format_description::well_known::Rfc3339)
+                    .map_err(|e| Error::Oauth(format!("format token expiry: {e}")))?,
+            ),
+            None => None,
+        };
+        Ok(RcloneToken {
+            access_token,
+            refresh_token: read_refresh_token(&self.tokens_path)?,
+            expiry_rfc3339,
+        })
+    }
+}
+
+/// Recover the refresh token yup-oauth2 persisted in `tokens.json`.
+///
+/// The file is a JSON array of `{"scopes": [...], "token": {"refresh_token": ...,
+/// "access_token": ..., "expires_at": ..., "id_token": ...}}`. We parse it as an
+/// untyped [`serde_json::Value`] (not the typed `TokenInfo`) so we don't couple to
+/// `time`'s `expires_at` serialization. Prefer the entry scoped to Drive; otherwise
+/// take the first entry that carries a refresh token.
+///
+/// Returns `Ok(None)` when the file is absent or holds no refresh token — the caller
+/// treats that as "rclone cannot self-refresh", not an error.
+fn read_refresh_token(tokens_path: &Path) -> Result<Option<String>> {
+    let bytes = match std::fs::read(tokens_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Oauth(format!("parse tokens.json: {e}")))?;
+    let Some(entries) = v.as_array() else {
+        return Ok(None);
+    };
+    let drive_scope = DRIVE_SCOPES[0];
+    let scoped_to_drive = |e: &&serde_json::Value| {
+        e.get("scopes")
+            .and_then(|s| s.as_array())
+            .is_some_and(|arr| arr.iter().any(|s| s.as_str() == Some(drive_scope)))
+    };
+    let has_refresh = |e: &&serde_json::Value| {
+        e.pointer("/token/refresh_token")
+            .and_then(|r| r.as_str())
+            .is_some()
+    };
+    let pick = entries
+        .iter()
+        .find(scoped_to_drive)
+        .or_else(|| entries.iter().find(has_refresh));
+    Ok(pick
+        .and_then(|e| e.pointer("/token/refresh_token"))
+        .and_then(|r| r.as_str())
+        .map(str::to_owned))
 }
 
 /// Decide which provider to use and return it behind `Arc<dyn TokenProvider>`.
@@ -141,10 +240,16 @@ pub async fn build_provider(
                 .token()
                 .ok_or_else(|| Error::Oauth("token() returned no access token".into()))?
                 .to_owned();
-            Ok(access)
+            Ok(AccessAndExpiry {
+                access_token: access,
+                expiry: t.expiration_time(),
+            })
         })
     });
-    Ok(Arc::new(YupOAuthProvider { fetcher }))
+    Ok(Arc::new(YupOAuthProvider {
+        fetcher,
+        tokens_path,
+    }))
 }
 
 /// `InstalledFlowDelegate` that opens the OAuth consent URL in the user's default
@@ -246,6 +351,57 @@ mod tests {
         let p = StaticToken::new("abc");
         assert_eq!(p.token().await.unwrap(), "abc");
         assert_eq!(p.token().await.unwrap(), "abc");
+    }
+
+    #[tokio::test]
+    async fn static_token_rclone_token_has_no_refresh_or_expiry() {
+        let p = StaticToken::new("abc");
+        let rt = p.rclone_token().await.unwrap();
+        assert_eq!(rt.access_token, "abc");
+        assert!(rt.refresh_token.is_none());
+        assert!(rt.expiry_rfc3339.is_none());
+    }
+
+    #[test]
+    fn read_refresh_token_missing_file_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = read_refresh_token(&tmp.path().join("nope.json")).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn read_refresh_token_prefers_drive_scoped_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(TOKENS_FILE);
+        // Shape produced by yup-oauth2's on-disk JSONTokens: an array of
+        // {scopes, token:{...}} entries. A non-Drive entry comes first to prove
+        // the Drive-scoped one is selected.
+        let body = format!(
+            r#"[
+              {{"scopes":["https://www.googleapis.com/auth/other"],
+                "token":{{"access_token":"a0","refresh_token":"other-rt","expires_at":"2099-01-01T00:00:00Z","id_token":null}}}},
+              {{"scopes":["{drive}"],
+                "token":{{"access_token":"a1","refresh_token":"drive-rt","expires_at":"2099-01-01T00:00:00Z","id_token":null}}}}
+            ]"#,
+            drive = DRIVE_SCOPES[0]
+        );
+        std::fs::write(&path, body).unwrap();
+        let got = read_refresh_token(&path).unwrap();
+        assert_eq!(got.as_deref(), Some("drive-rt"));
+    }
+
+    #[test]
+    fn read_refresh_token_falls_back_to_first_with_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(TOKENS_FILE);
+        // No Drive-scoped entry; the first entry carrying a refresh token wins.
+        let body = r#"[
+          {"scopes":["https://www.googleapis.com/auth/other"],
+            "token":{"access_token":"a0","refresh_token":"only-rt","expires_at":"2099-01-01T00:00:00Z","id_token":null}}
+        ]"#;
+        std::fs::write(&path, body).unwrap();
+        let got = read_refresh_token(&path).unwrap();
+        assert_eq!(got.as_deref(), Some("only-rt"));
     }
 
     #[tokio::test]

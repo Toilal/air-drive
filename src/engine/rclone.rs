@@ -6,10 +6,11 @@
 //!
 //! | env var                              | value                                |
 //! |--------------------------------------|--------------------------------------|
-//! | `RCLONE_CONFIG_AIRDRIVE_TYPE`        | `drive`                              |
-//! | `RCLONE_CONFIG_AIRDRIVE_TOKEN`       | `{"access_token":"<bearer>",…}`      |
-//! | `RCLONE_CONFIG_AIRDRIVE_CLIENT_ID`   | optional override from `[oauth]`     |
-//! | `RCLONE_CONFIG_AIRDRIVE_SCOPE`       | `drive`                              |
+//! | `RCLONE_CONFIG_AIRDRIVE_TYPE`          | `drive`                              |
+//! | `RCLONE_CONFIG_AIRDRIVE_TOKEN`         | `{"access_token":…,"refresh_token":…,"expiry":…}` |
+//! | `RCLONE_CONFIG_AIRDRIVE_CLIENT_ID`     | optional override from `[oauth]`     |
+//! | `RCLONE_CONFIG_AIRDRIVE_CLIENT_SECRET` | optional override from `[oauth]`     |
+//! | `RCLONE_CONFIG_AIRDRIVE_SCOPE`         | `drive`                              |
 //!
 //! Subcommands:
 //!
@@ -18,11 +19,12 @@
 //! - **move_remote**: `rclone moveto airdrive:<old_id> airdrive:<new_parent>/<new_name>`
 //! - **delete_remote**: `rclone delete airdrive:<id>` (Drive trash)
 //!
-//! **Status**: subprocess wiring is in place. OAuth token handoff to rclone is the
-//! sole follow-up item — rclone wants a full token JSON (access + refresh + expiry),
-//! while `TokenProvider::token` returns only the access string. The structure below
-//! formats a JSON-shaped value with a placeholder refresh; production deploys MUST
-//! revisit this for long-running operations (tracked separately).
+//! **Token handoff**: [`TokenProvider::rclone_token`] supplies the access token, its
+//! real expiry, and — when available — the refresh token. With the refresh token plus
+//! `client_id` + `client_secret` from `[oauth]`, rclone can refresh on its own during a
+//! single long-running transfer instead of failing with `401` when the access token
+//! expires mid-operation (issue #5). `--config /dev/null` is kept: rclone refreshes
+//! in-memory and discards the write-back, since yup-oauth2 owns the canonical token.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,7 +32,7 @@ use std::sync::Arc;
 
 use tokio::process::Command;
 
-use crate::drive::auth::TokenProvider;
+use crate::drive::auth::{RcloneToken, TokenProvider};
 use crate::drive::http::DriveHttp;
 use crate::engine::staging;
 use crate::engine::{RemoteFile, SyncEngine};
@@ -79,6 +81,10 @@ pub struct RcloneEngine {
     binary: RcloneBinary,
     token_provider: Arc<dyn TokenProvider>,
     client_id: Option<String>,
+    /// OAuth `client_secret` from `[oauth]`. Passed to rclone alongside `client_id`
+    /// so it can refresh the access token itself during a long transfer. `None`
+    /// (embedded client, no override) means rclone cannot self-refresh — see #180.
+    client_secret: Option<String>,
     /// Watched local root, used as the base for [`staging::stage_path`] on downloads.
     local_root: PathBuf,
     /// Shared Drive REST client. Used for the metadata lookup that precedes
@@ -103,11 +109,14 @@ impl RcloneEngine {
     /// - `token_provider` — supplies the access token rclone is configured with on
     ///   every invocation. Refresh is the provider's responsibility.
     /// - `client_id` — optional OAuth client_id override from `Config.oauth.client_id`.
+    /// - `client_secret` — companion `client_secret` from `Config.oauth.client_secret`,
+    ///   passed to rclone so it can self-refresh the token during long transfers.
     /// - `local_root` — watched local folder; used as the base for staged downloads.
     pub fn new(
         binary: RcloneBinary,
         token_provider: Arc<dyn TokenProvider>,
         client_id: Option<String>,
+        client_secret: Option<String>,
         local_root: PathBuf,
         http: DriveHttp,
     ) -> Self {
@@ -115,6 +124,7 @@ impl RcloneEngine {
             binary,
             token_provider,
             client_id,
+            client_secret,
             local_root,
             http,
         }
@@ -128,14 +138,27 @@ impl RcloneEngine {
     /// Build a `Command` with the conventional remote configured via env. Caller adds
     /// the subcommand-specific args (`copyto`, `moveto`, `delete`, …) and runs it.
     async fn base_command(&self) -> Result<Command> {
-        let token = self.token_provider.token().await?;
-        let token_json = format_token_json(&token);
+        let creds = self.token_provider.rclone_token().await?;
+        // Without client credentials rclone can't refresh even when it has a refresh
+        // token — it would fall back to its own built-in client, which doesn't match
+        // our token. This is the embedded-client case (see #180); flag it for the long
+        // transfers it affects without spamming every invocation at a higher level.
+        if creds.refresh_token.is_some() && self.client_secret.is_none() {
+            tracing::debug!(
+                "rclone has a refresh token but no client_secret; it cannot self-refresh \
+                 (set [oauth].client_id + client_secret) — long transfers may hit 401"
+            );
+        }
+        let token_json = format_token_json(&creds);
         let mut cmd = Command::new(&self.binary.path);
         cmd.env("RCLONE_CONFIG_AIRDRIVE_TYPE", "drive")
             .env("RCLONE_CONFIG_AIRDRIVE_TOKEN", token_json)
             .env("RCLONE_CONFIG_AIRDRIVE_SCOPE", "drive");
         if let Some(cid) = &self.client_id {
             cmd.env("RCLONE_CONFIG_AIRDRIVE_CLIENT_ID", cid);
+        }
+        if let Some(cs) = &self.client_secret {
+            cmd.env("RCLONE_CONFIG_AIRDRIVE_CLIENT_SECRET", cs);
         }
         cmd.arg("--config")
             .arg("/dev/null") // never touch the user's rclone.conf
@@ -158,19 +181,42 @@ impl RcloneEngine {
     }
 }
 
-/// Encode the access token in the JSON shape rclone's Drive backend expects.
+/// Placeholder expiry used when the provider can't supply a real one (e.g.
+/// [`crate::drive::auth::StaticToken`] in tests). Far enough out that rclone treats
+/// the token as fresh — the legacy behaviour.
+const FAR_FUTURE_EXPIRY: &str = "2099-01-01T00:00:00Z";
+
+/// Encode the credentials in the JSON shape rclone's Drive backend expects:
+/// `{"access_token": ..., "token_type": "Bearer", "expiry": ..., "refresh_token": ...}`.
 ///
-/// Rclone needs `{"access_token": ..., "token_type": "Bearer", "expiry": ...}` at
-/// minimum. We have only the access string from [`TokenProvider`], so we emit a
-/// short-lived envelope. For long-running operations rclone may try to refresh — when
-/// that path matters we'll need to surface the refresh token too (tracked as follow-up
-/// in the module docs).
-fn format_token_json(access_token: &str) -> String {
-    let escaped = access_token.replace('\\', "\\\\").replace('"', "\\\"");
-    // Expiry well in the future so rclone treats the token as fresh.
-    format!(
-        "{{\"access_token\":\"{escaped}\",\"token_type\":\"Bearer\",\"expiry\":\"2099-01-01T00:00:00Z\"}}"
-    )
+/// The `expiry` is the token's **real** RFC 3339 expiry when known, so rclone refreshes
+/// itself exactly when needed during a long transfer; it falls back to a far-future
+/// placeholder otherwise. `refresh_token` is included only when available — with it (and
+/// `client_id` + `client_secret`) rclone can self-refresh; without it, only the access
+/// token's remaining lifetime is usable. Built with `serde_json` so string escaping is
+/// handled correctly.
+fn format_token_json(creds: &RcloneToken) -> String {
+    let expiry = creds
+        .expiry_rfc3339
+        .clone()
+        .unwrap_or_else(|| FAR_FUTURE_EXPIRY.to_owned());
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "access_token".to_owned(),
+        serde_json::Value::String(creds.access_token.clone()),
+    );
+    map.insert(
+        "token_type".to_owned(),
+        serde_json::Value::String("Bearer".to_owned()),
+    );
+    map.insert("expiry".to_owned(), serde_json::Value::String(expiry));
+    if let Some(rt) = &creds.refresh_token {
+        map.insert(
+            "refresh_token".to_owned(),
+            serde_json::Value::String(rt.clone()),
+        );
+    }
+    serde_json::Value::Object(map).to_string()
 }
 
 #[async_trait::async_trait]
@@ -375,6 +421,7 @@ mod tests {
             dummy_binary(),
             token,
             None,
+            None,
             PathBuf::from("/tmp/root"),
             http,
         );
@@ -382,12 +429,34 @@ mod tests {
         assert_eq!(engine.binary().source, RcloneSource::Path);
     }
 
+    fn creds(access: &str, refresh: Option<&str>, expiry: Option<&str>) -> RcloneToken {
+        RcloneToken {
+            access_token: access.to_owned(),
+            refresh_token: refresh.map(str::to_owned),
+            expiry_rfc3339: expiry.map(str::to_owned),
+        }
+    }
+
     #[test]
     fn format_token_json_escapes_quotes_and_backslashes() {
-        let s = format_token_json(r#"abc"\xyz"#);
+        let s = format_token_json(&creds(r#"abc"\xyz"#, None, None));
         assert!(s.contains(r#""access_token":"abc\"\\xyz""#));
         assert!(s.contains(r#""token_type":"Bearer""#));
+    }
+
+    #[test]
+    fn format_token_json_without_expiry_uses_far_future_and_omits_refresh() {
+        let s = format_token_json(&creds("tok", None, None));
         assert!(s.contains("2099-01-01"));
+        assert!(!s.contains("refresh_token"));
+    }
+
+    #[test]
+    fn format_token_json_includes_real_expiry_and_refresh_when_present() {
+        let s = format_token_json(&creds("tok", Some("rt-123"), Some("2030-06-01T12:00:00Z")));
+        assert!(s.contains(r#""expiry":"2030-06-01T12:00:00Z""#));
+        assert!(s.contains(r#""refresh_token":"rt-123""#));
+        assert!(!s.contains("2099-01-01"));
     }
 
     #[test]
