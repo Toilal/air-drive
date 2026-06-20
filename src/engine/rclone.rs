@@ -474,4 +474,89 @@ mod tests {
         let raw = b"[]";
         assert!(parse_lsjson_single(raw).is_err());
     }
+
+    /// Token provider that returns a full credential bundle (refresh token + real
+    /// expiry), to exercise the rclone self-refresh handoff in `base_command`.
+    struct FullToken;
+
+    #[async_trait::async_trait]
+    impl TokenProvider for FullToken {
+        async fn token(&self) -> Result<String> {
+            Ok("acc".to_owned())
+        }
+        async fn rclone_token(&self) -> Result<RcloneToken> {
+            Ok(RcloneToken {
+                access_token: "acc".to_owned(),
+                refresh_token: Some("rt-xyz".to_owned()),
+                expiry_rfc3339: Some("2030-01-01T00:00:00Z".to_owned()),
+            })
+        }
+    }
+
+    /// Collect a command's environment into a map of UTF-8 key/value pairs.
+    fn env_map(cmd: &Command) -> std::collections::HashMap<String, String> {
+        cmd.as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_owned(), v?.to_str()?.to_owned())))
+            .collect()
+    }
+
+    fn test_http() -> DriveHttp {
+        DriveHttp::with_bases(
+            Arc::new(StaticToken::new("x")),
+            "http://x",
+            "http://x/upload",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn base_command_injects_client_secret_and_full_token() {
+        let engine = RcloneEngine::new(
+            dummy_binary(),
+            Arc::new(FullToken),
+            Some("cid".to_owned()),
+            Some("csecret".to_owned()),
+            PathBuf::from("/tmp/root"),
+            test_http(),
+        );
+        let cmd = engine.base_command().await.unwrap();
+        let env = env_map(&cmd);
+        assert_eq!(
+            env.get("RCLONE_CONFIG_AIRDRIVE_CLIENT_ID")
+                .map(String::as_str),
+            Some("cid")
+        );
+        assert_eq!(
+            env.get("RCLONE_CONFIG_AIRDRIVE_CLIENT_SECRET")
+                .map(String::as_str),
+            Some("csecret")
+        );
+        let token = env.get("RCLONE_CONFIG_AIRDRIVE_TOKEN").unwrap();
+        assert!(token.contains(r#""refresh_token":"rt-xyz""#), "{token}");
+        assert!(
+            token.contains(r#""expiry":"2030-01-01T00:00:00Z""#),
+            "{token}"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_command_omits_client_secret_when_absent() {
+        let engine = RcloneEngine::new(
+            dummy_binary(),
+            Arc::new(StaticToken::new("tok")),
+            None,
+            None,
+            PathBuf::from("/tmp/root"),
+            test_http(),
+        );
+        let cmd = engine.base_command().await.unwrap();
+        let env = env_map(&cmd);
+        assert!(!env.contains_key("RCLONE_CONFIG_AIRDRIVE_CLIENT_SECRET"));
+        assert!(!env.contains_key("RCLONE_CONFIG_AIRDRIVE_CLIENT_ID"));
+        // StaticToken has no refresh token and no real expiry → far-future placeholder.
+        let token = env.get("RCLONE_CONFIG_AIRDRIVE_TOKEN").unwrap();
+        assert!(token.contains("2099-01-01"), "{token}");
+        assert!(!token.contains("refresh_token"), "{token}");
+    }
 }

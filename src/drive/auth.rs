@@ -404,6 +404,43 @@ mod tests {
         assert_eq!(got.as_deref(), Some("only-rt"));
     }
 
+    #[test]
+    fn read_refresh_token_empty_array_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(TOKENS_FILE);
+        std::fs::write(&path, b"[]").unwrap();
+        assert!(read_refresh_token(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_refresh_token_non_array_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(TOKENS_FILE);
+        std::fs::write(&path, br#"{"unexpected":"shape"}"#).unwrap();
+        assert!(read_refresh_token(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_refresh_token_entry_without_refresh_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(TOKENS_FILE);
+        // An access-only entry (refresh token absent) yields None rather than erroring.
+        let body = format!(
+            r#"[{{"scopes":["{drive}"],"token":{{"access_token":"a1","expires_at":"2099-01-01T00:00:00Z","id_token":null}}}}]"#,
+            drive = DRIVE_SCOPES[0]
+        );
+        std::fs::write(&path, body).unwrap();
+        assert!(read_refresh_token(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_refresh_token_malformed_json_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(TOKENS_FILE);
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(read_refresh_token(&path).is_err());
+    }
+
     #[tokio::test]
     async fn factory_honours_test_bearer_override() {
         let tmp = tempfile::tempdir().unwrap();
