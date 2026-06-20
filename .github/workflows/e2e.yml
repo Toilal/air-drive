@@ -2,10 +2,13 @@ name: e2e (real Drive + rclone)
 
 # Why this lives in a separate workflow from `ci.yml`:
 #
-# - Burns Drive API quota and shared scratch space, so we only run it on `push to
-#   main` (merges) and on demand (`workflow_dispatch`), never on every PR.
-# - Needs real credentials (GitHub Secrets) that we don't want exposed to forked
-#   PR builds.
+# - Burns Drive API quota and shared scratch space. It runs on `push to main`
+#   (merges), on tags (release validation), on pull requests targeting `main`,
+#   and on demand (`workflow_dispatch`).
+# - Needs real credentials (GitHub Secrets). GitHub does NOT expose secrets to
+#   workflows triggered by pull requests from forks, so the e2e job will fail
+#   for fork PRs (missing `AIR_DRIVE_E2E_*`). Only same-repo PRs get the
+#   credentials.
 # - Installs `rclone` from apt — the cost is acceptable here but pointless to
 #   pay on the mocked CI runs.
 #
@@ -15,6 +18,11 @@ name: e2e (real Drive + rclone)
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+    tags:
+      - "*"
+  pull_request:
     branches:
       - main
 
@@ -33,6 +41,11 @@ jobs:
   e2e:
     name: cargo test --test rclone_drive -- --ignored
     runs-on: ubuntu-latest
+    # Fork PRs don't get repo secrets (`AIR_DRIVE_E2E_*`), so the job can't run.
+    # Skip it for them instead of failing; push/tag/dispatch are always same-repo.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     # Don't expose secrets to forks. The default permissions are already minimal,
     # but make the intent explicit.
     permissions:
