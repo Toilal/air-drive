@@ -92,6 +92,11 @@ roadmap. Treat a roadmap entry for already-shipped work as a bug.
 Keep the roadmap and the [GitHub issue tracker](https://github.com/Toilal/air-drive/issues)
 consistent: a roadmap file should link its issue where one exists.
 
+**Do not reference roadmap items in commit messages.** Roadmap files are
+transient (they are deleted when the feature ships), so a `NNN-slug` reference
+would dangle in history. Reference the tracking **issue** instead (e.g.
+`Closes #7`) — issues are permanent.
+
 ## Core principles
 
 ### I. Rust-first, memory-safe by default
