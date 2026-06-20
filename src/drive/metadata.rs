@@ -218,11 +218,7 @@ fn ensure_folder(meta: &DriveFileMeta) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_path_notation(
-    http: &DriveHttp,
-    path: &str,
-    auto_create: bool,
-) -> Result<String> {
+async fn resolve_path_notation(http: &DriveHttp, path: &str, auto_create: bool) -> Result<String> {
     // Strip leading/trailing slashes and split into segments. Empty path resolves to the
     // user's My Drive root.
     let segments: Vec<&str> = path
@@ -245,7 +241,9 @@ async fn resolve_path_notation(
     let mut current = start;
     for seg in rest {
         let children = list_children(http, &current).await?;
-        let found = children.into_iter().find(|c| c.is_folder() && c.name == *seg);
+        let found = children
+            .into_iter()
+            .find(|c| c.is_folder() && c.name == *seg);
         current = match found {
             Some(c) => c.id,
             None if auto_create => {

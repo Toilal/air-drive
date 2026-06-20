@@ -222,10 +222,17 @@ mod tests {
         let account_id = accounts::upsert(db.connection(), "alice@gmail.com", 1)
             .await
             .unwrap();
-        let mapping_id =
-            mapping::upsert(db.connection(), account_id, "/home/alice", "rid", None, None, 1)
-                .await
-                .unwrap();
+        let mapping_id = mapping::upsert(
+            db.connection(),
+            account_id,
+            "/home/alice",
+            "rid",
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
         let item_id = items::insert(
             db.connection(),
             &NewSyncItem {
