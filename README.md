@@ -31,6 +31,22 @@ dispatch (`.github/workflows/e2e.yml`).
 See [`CLAUDE.md`](./CLAUDE.md) for the project's principles, technology stack, and
 quality gates.
 
+## Documentation
+
+Full documentation lives under [`docs/`](./docs/), indexed by
+[`docs/README.md`](./docs/README.md):
+
+- **User guides** — [installation](./docs/guide/installation.md),
+  [CLI reference](./docs/guide/cli.md),
+  [configuration](./docs/guide/configuration.md),
+  [OAuth setup](./docs/guide/oauth-setup.md).
+- **Internals** — [architecture](./docs/internals/architecture.md),
+  [sync model](./docs/internals/sync-model.md),
+  [state schema](./docs/internals/state-schema.md),
+  [development](./docs/internals/development.md).
+
+Contributors should also read [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
 ## Install (Linux, systemd)
 
 ### One-liner

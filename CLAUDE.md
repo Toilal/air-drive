@@ -28,6 +28,44 @@ but anything written to disk or to a remote MUST be in English.
 - **UI**: Tauri v2.
 - **License**: Apache-2.0. Dependencies MUST be Apache-2.0–compatible (MIT,
   BSD, ISC, MPL-2.0, Apache-2.0). Linked GPL/AGPL is forbidden.
+- **Docs**: the `docs/` tree (see [Documentation](#documentation)) MUST be kept
+  in sync with every change that affects it — same commit as the code.
+
+## Documentation
+
+End-user and contributor documentation lives under [`docs/`](./docs/), indexed
+by [`docs/README.md`](./docs/README.md):
+
+- **User guides** ([`docs/guide/`](./docs/guide/)):
+  [`installation.md`](./docs/guide/installation.md),
+  [`cli.md`](./docs/guide/cli.md),
+  [`configuration.md`](./docs/guide/configuration.md),
+  [`oauth-setup.md`](./docs/guide/oauth-setup.md).
+- **Internals** ([`docs/internals/`](./docs/internals/)):
+  [`architecture.md`](./docs/internals/architecture.md),
+  [`sync-model.md`](./docs/internals/sync-model.md),
+  [`state-schema.md`](./docs/internals/state-schema.md),
+  [`development.md`](./docs/internals/development.md).
+
+These docs are **part of the change, not an afterthought**. Any change that
+alters documented behaviour MUST update the affected doc **in the same commit**.
+Treat a stale doc as a bug. In particular:
+
+- New / changed / removed **CLI command, flag, or exit code** → `docs/guide/cli.md`.
+- New / changed / removed **`config.toml` key**, on-disk path, or ignore-pattern
+  default → `docs/guide/configuration.md`.
+- **OAuth scope** or client-bootstrap flow change → `docs/guide/oauth-setup.md`.
+- **Install / service** flow change → `docs/guide/installation.md`.
+- New module, loop, or **`SyncEngine`** change → `docs/internals/architecture.md`.
+- **Event handling, reconciliation, conflict, or retry** change →
+  `docs/internals/sync-model.md`.
+- **SQLite schema migration** (new `Vn_SCHEMA`, bumped `LATEST_VERSION`) →
+  `docs/internals/state-schema.md`.
+- **Build, test tier, or quality-gate** change → `docs/internals/development.md`
+  (and [`CONTRIBUTING.md`](./CONTRIBUTING.md) if the workflow changes).
+
+When adding a brand-new documentable surface, also add it to the index in
+`docs/README.md`. All docs are English (see [Language](#language)).
 
 ## Core principles
 
