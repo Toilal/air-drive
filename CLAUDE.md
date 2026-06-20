@@ -36,34 +36,34 @@ but anything written to disk or to a remote MUST be in English.
 End-user and contributor documentation lives under [`docs/`](./docs/), indexed
 by [`docs/README.md`](./docs/README.md):
 
-- **User guides** ([`docs/guide/`](./docs/guide/)):
-  [`installation.md`](./docs/guide/installation.md),
-  [`cli.md`](./docs/guide/cli.md),
-  [`configuration.md`](./docs/guide/configuration.md),
-  [`oauth-setup.md`](./docs/guide/oauth-setup.md).
-- **Internals** ([`docs/internals/`](./docs/internals/)):
-  [`architecture.md`](./docs/internals/architecture.md),
-  [`sync-model.md`](./docs/internals/sync-model.md),
-  [`state-schema.md`](./docs/internals/state-schema.md),
-  [`development.md`](./docs/internals/development.md).
-- **Project**: [`docs/roadmap.md`](./docs/roadmap.md) — keep in sync with the
+- **User guides** ([`docs/user/`](./docs/user/)):
+  [`installation.md`](./docs/user/installation.md),
+  [`cli.md`](./docs/user/cli.md),
+  [`configuration.md`](./docs/user/configuration.md),
+  [`oauth-setup.md`](./docs/user/oauth-setup.md).
+- **Internals** ([`docs/dev/`](./docs/dev/)):
+  [`architecture.md`](./docs/dev/architecture.md),
+  [`sync-model.md`](./docs/dev/sync-model.md),
+  [`state-schema.md`](./docs/dev/state-schema.md),
+  [`development.md`](./docs/dev/development.md).
+- **Project**: [`docs/roadmap/`](./docs/roadmap/) — keep in sync with the
   issue tracker; remove items as they ship, add new directions with their issue.
 
 These docs are **part of the change, not an afterthought**. Any change that
 alters documented behaviour MUST update the affected doc **in the same commit**.
 Treat a stale doc as a bug. In particular:
 
-- New / changed / removed **CLI command, flag, or exit code** → `docs/guide/cli.md`.
+- New / changed / removed **CLI command, flag, or exit code** → `docs/user/cli.md`.
 - New / changed / removed **`config.toml` key**, on-disk path, or ignore-pattern
-  default → `docs/guide/configuration.md`.
-- **OAuth scope** or client-bootstrap flow change → `docs/guide/oauth-setup.md`.
-- **Install / service** flow change → `docs/guide/installation.md`.
-- New module, loop, or **`SyncEngine`** change → `docs/internals/architecture.md`.
+  default → `docs/user/configuration.md`.
+- **OAuth scope** or client-bootstrap flow change → `docs/user/oauth-setup.md`.
+- **Install / service** flow change → `docs/user/installation.md`.
+- New module, loop, or **`SyncEngine`** change → `docs/dev/architecture.md`.
 - **Event handling, reconciliation, conflict, or retry** change →
-  `docs/internals/sync-model.md`.
+  `docs/dev/sync-model.md`.
 - **SQLite schema migration** (new `Vn_SCHEMA`, bumped `LATEST_VERSION`) →
-  `docs/internals/state-schema.md`.
-- **Build, test tier, or quality-gate** change → `docs/internals/development.md`
+  `docs/dev/state-schema.md`.
+- **Build, test tier, or quality-gate** change → `docs/dev/development.md`
   (and [`CONTRIBUTING.md`](./CONTRIBUTING.md) if the workflow changes).
 
 When adding a brand-new documentable surface, also add it to the index in

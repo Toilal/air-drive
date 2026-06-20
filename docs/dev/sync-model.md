@@ -15,7 +15,7 @@ noisy — a single save can produce several events — so they pass through a
 
 Files whose **name** matches any `[watch].ignore_patterns` glob are dropped at
 this stage: no upload, no rename propagation, no delete propagation. See
-[configuration](../guide/configuration.md#default-ignore-patterns).
+[configuration](../user/configuration.md#default-ignore-patterns).
 
 ### Remote side — changes.list + pageToken
 

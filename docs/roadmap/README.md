@@ -8,7 +8,7 @@ link to their issue where one exists.
 
 The MVP that has shipped: bidirectional event-driven sync, a single Drive
 account, one mapped folder pair, the `rclone` engine behind the `SyncEngine`
-trait, and a systemd-managed daemon. See [`README.md`](../README.md) for the
+trait, and a systemd-managed daemon. See [`README.md`](../../README.md) for the
 current status.
 
 ## Known bugs to fix first
@@ -31,12 +31,12 @@ Make single-account, single-mapping sync genuinely complete and trustworthy.
 - **Handle native Google Docs** (export, `.gdoc` shortcut, or an explicit
   skip-with-UX) ([#3](https://github.com/Toilal/air-drive/issues/3), medium) —
   today `application/vnd.google-apps.*` items are skipped silently
-  (see [sync model](internals/sync-model.md#native-google-docs)).
+  (see [sync model](../dev/sync-model.md#native-google-docs)).
 - **Symlinks**: follow or preserve them instead of dropping silently
   ([#2](https://github.com/Toilal/air-drive/issues/2), low).
 - **rclone auto-download**: the post-install download with SHA-256 verification
   to `~/.cache/air-drive/bin/rclone` described in
-  [`CLAUDE.md`](../CLAUDE.md) §VI is not wired yet — the daemon currently
+  [`CLAUDE.md`](../../CLAUDE.md) §VI is not wired yet — the daemon currently
   requires a pre-existing `rclone`.
 - **`recovered` state**: surface recovery from a transient Drive hiccup in
   `state_meta` / `status` (placeholder exists, not wired).
@@ -46,7 +46,7 @@ Make single-account, single-mapping sync genuinely complete and trustworthy.
 Lift the single-pair restriction and cover more of Drive's surface. The SQLite
 schema is already multi-account/multi-mapping by design (rows key off
 `account_id` / `mapping_id`); the work is in the CLI and daemon, not the data
-model (see [state schema](internals/state-schema.md)).
+model (see [state schema](../dev/state-schema.md)).
 
 - **Multi-mapping support**: lift the singleton-mapping restriction
   ([#13](https://github.com/Toilal/air-drive/issues/13), medium). Unblocks
@@ -62,7 +62,7 @@ model (see [state schema](internals/state-schema.md)).
 
 ## Long-term — UI, packaging, and the native engine
 
-The product vision from [`CLAUDE.md`](../CLAUDE.md).
+The product vision from [`CLAUDE.md`](../../CLAUDE.md).
 
 - **Desktop UI** (Tauri v2): a lightweight tray + settings UI. A `tray-icon` +
   `tao` tray-only fallback is acceptable if Tauri causes platform issues
@@ -84,7 +84,7 @@ The product vision from [`CLAUDE.md`](../CLAUDE.md).
 
 ## How this list is maintained
 
-Per [`CLAUDE.md`](../CLAUDE.md), docs are updated in the same commit as the
+Per [`CLAUDE.md`](../../CLAUDE.md), docs are updated in the same commit as the
 change they describe. When an item here ships, remove it (the code docs and
-[`docs/README.md`](README.md) index should already reflect the new behaviour);
+[`docs/README.md`](../README.md) index should already reflect the new behaviour);
 when a new direction is decided, add it with a link to its tracking issue.

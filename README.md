@@ -36,15 +36,15 @@ quality gates.
 Full documentation lives under [`docs/`](./docs/), indexed by
 [`docs/README.md`](./docs/README.md):
 
-- **User guides** — [installation](./docs/guide/installation.md),
-  [CLI reference](./docs/guide/cli.md),
-  [configuration](./docs/guide/configuration.md),
-  [OAuth setup](./docs/guide/oauth-setup.md).
-- **Internals** — [architecture](./docs/internals/architecture.md),
-  [sync model](./docs/internals/sync-model.md),
-  [state schema](./docs/internals/state-schema.md),
-  [development](./docs/internals/development.md).
-- **Project** — [roadmap](./docs/roadmap.md).
+- **User guides** — [installation](./docs/user/installation.md),
+  [CLI reference](./docs/user/cli.md),
+  [configuration](./docs/user/configuration.md),
+  [OAuth setup](./docs/user/oauth-setup.md).
+- **Internals** — [architecture](./docs/dev/architecture.md),
+  [sync model](./docs/dev/sync-model.md),
+  [state schema](./docs/dev/state-schema.md),
+  [development](./docs/dev/development.md).
+- **Project** — [roadmap](./docs/roadmap/).
 
 Contributors should also read [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
