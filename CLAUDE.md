@@ -46,8 +46,8 @@ by [`docs/README.md`](./docs/README.md):
   [`sync-model.md`](./docs/dev/sync-model.md),
   [`state-schema.md`](./docs/dev/state-schema.md),
   [`development.md`](./docs/dev/development.md).
-- **Project**: [`docs/roadmap/`](./docs/roadmap/) — keep in sync with the
-  issue tracker; remove items as they ship, add new directions with their issue.
+- **Project**: [`docs/roadmap/`](./docs/roadmap/) — one ordered file per planned
+  feature; see [Roadmap](#roadmap) below.
 
 These docs are **part of the change, not an afterthought**. Any change that
 alters documented behaviour MUST update the affected doc **in the same commit**.
@@ -68,6 +68,29 @@ Treat a stale doc as a bug. In particular:
 
 When adding a brand-new documentable surface, also add it to the index in
 `docs/README.md`. All docs are English (see [Language](#language)).
+
+## Roadmap
+
+[`docs/roadmap/`](./docs/roadmap/) is a **living document** — keep it alive as
+the project evolves, not as a write-once wish list. Each planned feature is its
+own `NNN-slug.md` file, ordered by a three-digit prefix (gaps of 10 so items can
+be reordered without renumbering), and indexed in
+[`docs/roadmap/README.md`](./docs/roadmap/README.md).
+
+Use the roadmap as **lightweight specs before development**. Before starting a
+feature, read its roadmap file (and refine it if scope is unclear) — the
+*Goal / Today / Approach / Acceptance* sections are the brief you build against.
+When a new direction is decided, add a roadmap file for it (with its tracking
+issue) **before** writing code.
+
+When a feature is **finished**, **delete its roadmap entry**: remove the
+`NNN-slug.md` file and its row in the index, in the same merge that ships the
+feature. The roadmap describes what is *not yet done* — a shipped feature lives
+in the code and the `docs/user/` + `docs/dev/` documentation, never in the
+roadmap. Treat a roadmap entry for already-shipped work as a bug.
+
+Keep the roadmap and the [GitHub issue tracker](https://github.com/Toilal/air-drive/issues)
+consistent: a roadmap file should link its issue where one exists.
 
 ## Core principles
 
