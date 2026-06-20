@@ -17,6 +17,11 @@ For people running air-drive on their machine.
 - [OAuth setup](guide/oauth-setup.md) — why air-drive needs the full `drive`
   scope and how to use your own Google Cloud OAuth client.
 
+## Project
+
+- [Roadmap](roadmap.md) — what's planned after the MVP, linked to the issue
+  tracker.
+
 ## Internals
 
 For contributors and anyone curious about how the daemon works.

@@ -44,6 +44,7 @@ Full documentation lives under [`docs/`](./docs/), indexed by
   [sync model](./docs/internals/sync-model.md),
   [state schema](./docs/internals/state-schema.md),
   [development](./docs/internals/development.md).
+- **Project** — [roadmap](./docs/roadmap.md).
 
 Contributors should also read [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 

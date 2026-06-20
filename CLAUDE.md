@@ -46,6 +46,8 @@ by [`docs/README.md`](./docs/README.md):
   [`sync-model.md`](./docs/internals/sync-model.md),
   [`state-schema.md`](./docs/internals/state-schema.md),
   [`development.md`](./docs/internals/development.md).
+- **Project**: [`docs/roadmap.md`](./docs/roadmap.md) — keep in sync with the
+  issue tracker; remove items as they ship, add new directions with their issue.
 
 These docs are **part of the change, not an afterthought**. Any change that
 alters documented behaviour MUST update the affected doc **in the same commit**.
