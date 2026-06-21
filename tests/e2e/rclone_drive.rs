@@ -351,6 +351,21 @@ async fn e7_local_dir_rename_propagates_via_rclone() {
         .expect("docs folder")
         .id;
 
+    // The continuous watcher only attaches inside `daemon::run`, which runs
+    // *after* the initial sync that just uploaded spec.txt. Renaming in that gap
+    // would race the inotify subscription and the event would be lost. The pause
+    // control socket is created as the continuous loop comes up, so wait for it
+    // (then settle briefly) to be sure the watcher is live before we rename.
+    let control_sock = fx.config_dir.join("runtime").join("control.sock");
+    let loop_up =
+        common::wait_until(Duration::from_secs(30), || async { control_sock.exists() }).await;
+    assert!(
+        loop_up,
+        "daemon continuous loop never came up; alive? {:?}",
+        daemon.poll_alive()
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // Rename the directory locally.
     std::fs::rename(fx.local_dir.join("docs"), fx.local_dir.join("documents")).unwrap();
 
@@ -366,11 +381,23 @@ async fn e7_local_dir_rename_propagates_via_rclone() {
             .unwrap_or(false)
     })
     .await;
-    assert!(
-        renamed,
-        "local folder rename should move the same Drive folder; alive? {:?}",
-        daemon.poll_alive()
-    );
+    if !renamed {
+        // Dump the real Drive state so a failure says *why*: documents absent =
+        // the local rename never propagated; documents present with a different
+        // id = it was re-created instead of moved.
+        let children = metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .unwrap_or_default();
+        let snapshot: Vec<String> = children
+            .iter()
+            .map(|c| format!("{} (id={}, folder={})", c.name, c.id, c.is_folder()))
+            .collect();
+        panic!(
+            "local folder rename should move the same Drive folder (docs_id={docs_id}); \
+             alive? {:?}; run-folder children now: {snapshot:?}",
+            daemon.poll_alive()
+        );
+    }
 
     daemon.shutdown().await;
     fx.cleanup().await;
