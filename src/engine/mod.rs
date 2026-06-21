@@ -99,4 +99,14 @@ pub trait SyncEngine: Send + Sync + 'static {
 
     /// Delete (trash) a remote file.
     async fn delete_remote(&self, remote_id: &str) -> Result<()>;
+
+    /// Create an empty folder on Drive under `remote_parent_id` and return its
+    /// metadata (the `size`/`md5` of the returned [`RemoteFile`] are not
+    /// meaningful for a folder). Used to propagate empty directories and to
+    /// anchor folder renames/moves.
+    async fn create_dir_remote(&self, remote_parent_id: &str, name: &str) -> Result<RemoteFile>;
+
+    /// Remove a remote folder (Drive trash) by id. Callers MUST delete a
+    /// folder's children first; this only removes the (expected-empty) folder.
+    async fn remove_dir_remote(&self, remote_id: &str) -> Result<()>;
 }

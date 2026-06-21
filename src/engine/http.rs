@@ -161,6 +161,23 @@ impl SyncEngine for HttpEngine {
         let path = format!("files/{remote_id}");
         self.http.delete(&path).await
     }
+
+    async fn create_dir_remote(&self, remote_parent_id: &str, name: &str) -> Result<RemoteFile> {
+        let meta =
+            crate::drive::metadata::create_folder(&self.http, remote_parent_id, name).await?;
+        Ok(RemoteFile {
+            id: meta.id,
+            mime: meta.mime_type,
+            size: 0,
+            md5: None,
+        })
+    }
+
+    async fn remove_dir_remote(&self, remote_id: &str) -> Result<()> {
+        // A Drive `files.delete` by id trashes a folder just like a file.
+        let path = format!("files/{remote_id}");
+        self.http.delete(&path).await
+    }
 }
 
 #[cfg(test)]

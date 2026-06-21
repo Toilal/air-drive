@@ -363,6 +363,27 @@ impl SyncEngine for RcloneEngine {
         self.run(cmd).await?;
         Ok(())
     }
+
+    async fn create_dir_remote(&self, remote_parent_id: &str, name: &str) -> Result<RemoteFile> {
+        // Folder create is a metadata op, not a byte transfer — handle it via
+        // DriveHttp like the other metadata lookups this engine already does
+        // (download/update both call `files.get`), rather than shelling out to
+        // `rclone mkdir` (which addresses by path and wouldn't return the id).
+        let meta =
+            crate::drive::metadata::create_folder(&self.http, remote_parent_id, name).await?;
+        Ok(RemoteFile {
+            id: meta.id,
+            mime: meta.mime_type,
+            size: 0,
+            md5: None,
+        })
+    }
+
+    async fn remove_dir_remote(&self, remote_id: &str) -> Result<()> {
+        // `rclone delete` removes files, not a directory itself; a Drive
+        // `files.delete` by id trashes the (expected-empty) folder directly.
+        self.http.delete(&format!("files/{remote_id}")).await
+    }
 }
 
 /// Parse a single entry from `rclone lsjson --hash` output. The command outputs a JSON
