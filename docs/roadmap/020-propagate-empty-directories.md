@@ -98,9 +98,15 @@ first sync of a tree with empty folders converges.
   folder whose whole subtree is removed (`continuous_sync.rs`
   `us2_6_remote_dir_delete_*`).
 
-Remaining before deletion of this entry: e2e verification against real Drive
-(the `RcloneEngine` dir methods are exercised only there; they delegate to the
-same `drive::metadata`/`DriveHttp` paths the mocked suite covers).
+- [x] e2e scenarios written (`tests/e2e/rclone_drive.rs` `e4`/`e5`/`e6`): empty
+  local dir → Drive, empty Drive folder → local, and a nested file uploaded into
+  a folder created on the fly. **Not yet executed** — they self-skip without
+  real-Drive credentials.
+
+Remaining before deletion of this entry: run the e2e suite against real Drive to
+confirm the `RcloneEngine` dir path end-to-end (the mocked suite already covers
+the shared `drive::metadata`/`DriveHttp` logic; a focused unit test covers the
+`RcloneEngine` methods directly).
 
 ## Unblocks
 
