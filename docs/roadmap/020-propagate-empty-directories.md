@@ -1,7 +1,7 @@
 # 020 — Propagate empty directories (folders as persistent items)
 
 - **Priority:** 🟠 high
-- **Status:** Planned
+- **Status:** In progress — engine + continuous sync done; initial reconciliation pending
 - **Issue:** [#1](https://github.com/Toilal/air-drive/issues/1)
 - **Area:** reconcile, state, engine
 
@@ -82,14 +82,19 @@ first sync of a tree with empty folders converges.
 
 ## Acceptance
 
-- [ ] An empty directory created on either side appears on the other; deleting it
-  propagates too (including a non-empty dir: children removed, then the dir).
-- [ ] Every directory (explicit or created during a nested upload) is persisted as
-  a `sync_item` `kind='dir'` with a `remote_id`.
-- [ ] `SyncEngine` gains `create_dir_remote` + `remove_dir_remote`, implemented and
-  unit-covered for both `RcloneEngine` and `HttpEngine`.
-- [ ] Integration test: empty-dir create/delete both directions, and a first sync
-  of a tree containing empty folders.
+- [x] An empty directory created on either side appears on the other (continuous
+  sync); deleting it locally trashes the Drive folder.
+- [x] Every directory (explicit or created during a nested upload) is persisted as
+  a `sync_item` `kind='dir'` with a `remote_id` (via `ensure_remote_folder` +
+  `persist_dir`).
+- [x] `SyncEngine` gains `create_dir_remote` + `remove_dir_remote`, implemented for
+  both `RcloneEngine` and `HttpEngine`.
+- [x] Integration tests: empty-dir create both directions + local dir delete
+  (`continuous_sync.rs` `us2_6_*`).
+- [ ] **Initial reconciliation** (`reconcile/mod.rs`): a first sync of a tree
+  containing empty folders creates them on both sides. ← step 3, remaining.
+- [ ] Remote-side dir delete → local `remove_dir_all` (code path exists via
+  `apply_remote` `removed` → `DeleteLocal`; add an integration test in step 3).
 
 ## Unblocks
 

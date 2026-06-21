@@ -495,6 +495,116 @@ async fn us2_5_drop_and_recover_drains_queue() {
 }
 
 // ---------------------------------------------------------------------------
+// empty directory create propagates to Drive (folders as persistent items)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_6_local_empty_dir_create_propagates() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(&fx, &mock, &root_id, &[]);
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // An *empty* directory — no file inside to drag it along.
+    std::fs::create_dir(fx.local_dir.join("newdir")).unwrap();
+
+    let created = wait_until(T_LOCAL_TO_REMOTE, || async {
+        let st = mock.state.lock().unwrap();
+        st.files.values().any(|f| {
+            f.is_folder() && f.name == "newdir" && f.parent_id.as_deref() == Some(root_id.as_str())
+        })
+    })
+    .await;
+    assert!(
+        created,
+        "empty dir should appear on Drive within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// empty directory created on Drive propagates to a local mkdir
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_6_remote_empty_dir_create_propagates_locally() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(&fx, &mock, &root_id, &[]);
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    mock.insert_folder(Some(&root_id), "remotedir");
+
+    let appeared = wait_until(T_REMOTE_TO_LOCAL, || async {
+        fx.local_dir.join("remotedir").is_dir()
+    })
+    .await;
+    assert!(
+        appeared,
+        "remote empty dir should land locally within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// deleting a synced (empty) directory locally trashes the Drive folder
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_6_local_dir_delete_propagates() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(&fx, &mock, &root_id, &[]);
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Create the dir and let it converge to Drive (so it gets a persisted
+    // sync_item with a remote_id to anchor the delete to).
+    std::fs::create_dir(fx.local_dir.join("doomeddir")).unwrap();
+    let created = wait_until(T_LOCAL_TO_REMOTE, || async {
+        let st = mock.state.lock().unwrap();
+        st.files
+            .values()
+            .any(|f| f.is_folder() && f.name == "doomeddir")
+    })
+    .await;
+    assert!(
+        created,
+        "precondition: dir reached Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Now remove it locally — the delete must propagate to Drive.
+    std::fs::remove_dir(fx.local_dir.join("doomeddir")).unwrap();
+    let gone = wait_until(T_LOCAL_TO_REMOTE, || async {
+        let st = mock.state.lock().unwrap();
+        !st.files
+            .values()
+            .any(|f| f.is_folder() && f.name == "doomeddir")
+    })
+    .await;
+    assert!(
+        gone,
+        "remote folder should be trashed within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // Seeding helpers — applied via sync rusqlite using the production schema.
 // ---------------------------------------------------------------------------
 

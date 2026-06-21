@@ -39,9 +39,45 @@ pub async fn apply_local(
 ) -> Result<()> {
     match event {
         WatchEvent::Created(p) | WatchEvent::Modified(p) => {
+            if p.is_dir() {
+                // Directory: persist as kind='dir' and enqueue a remote create.
+                // Idempotent — if we already track it there's nothing to do (covers
+                // a Modified on a dir and the watcher echo of a CreateDirLocal we
+                // just performed).
+                let rel = strip_root(&p, local_root)?;
+                if items::get_by_relative_path(db.connection(), mapping_id, &rel)
+                    .await?
+                    .is_none()
+                {
+                    let new_id = items::insert(
+                        db.connection(),
+                        &NewSyncItem {
+                            mapping_id,
+                            relative_path: rel,
+                            kind: ItemKind::Dir,
+                            remote_id: None,
+                            size: None,
+                            md5: None,
+                            local_inode: None,
+                            last_synced_at: 0,
+                            state: ItemState::PendingLocal,
+                        },
+                    )
+                    .await?;
+                    ops::enqueue(
+                        db.connection(),
+                        new_id,
+                        Operation::CreateDirRemote,
+                        None,
+                        unix_now(),
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
             if !p.is_file() {
-                // Directory create — nothing to do; folders are materialised
-                // implicitly when their first file syncs.
+                // Neither a regular file nor a directory — it vanished between the
+                // event and now, or it's a special file. Nothing to do.
                 return Ok(());
             }
             let rel = strip_root(&p, local_root)?;
@@ -180,8 +216,41 @@ pub async fn apply_remote(
     };
 
     if file.is_folder() {
-        // Folder creation on the remote side: we don't pre-create the local
-        // counterpart; it materialises when a file inside it is downloaded.
+        // Persist the folder as kind='dir' and enqueue a local mkdir. If we
+        // already know it by remote_id, this is the echo of a folder we created
+        // ourselves — skip it.
+        if items::get_by_remote_id(db.connection(), &change.file_id)
+            .await?
+            .is_none()
+        {
+            let rel = change
+                .relative_path
+                .clone()
+                .unwrap_or_else(|| file.name.clone());
+            let new_id = items::insert(
+                db.connection(),
+                &NewSyncItem {
+                    mapping_id,
+                    relative_path: rel,
+                    kind: ItemKind::Dir,
+                    remote_id: Some(file.id.clone()),
+                    size: None,
+                    md5: None,
+                    local_inode: None,
+                    last_synced_at: 0,
+                    state: ItemState::PendingLocal,
+                },
+            )
+            .await?;
+            ops::enqueue(
+                db.connection(),
+                new_id,
+                Operation::CreateDirLocal,
+                None,
+                unix_now(),
+            )
+            .await?;
+        }
         return Ok(());
     }
     if file.mime_type.starts_with(NATIVE_GAPPS_PREFIX) {

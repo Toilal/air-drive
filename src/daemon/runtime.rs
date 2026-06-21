@@ -28,6 +28,7 @@ use crate::error::{Error, Result};
 use crate::reconcile::fingerprint;
 use crate::state::Db;
 use crate::state::items;
+use crate::state::mapping::MappingId;
 use crate::state::meta::{self, BlockedKind};
 use crate::state::ops::{self, Operation, PendingOperation};
 use crate::state::unix_now;
@@ -245,7 +246,15 @@ async fn execute(
                 }
                 None => {
                     let (parent_rel, name) = split_parent(&item.relative_path);
-                    let parent_id = ensure_remote_folder(http, remote_root_id, parent_rel).await?;
+                    let parent_id = ensure_remote_folder(
+                        engine,
+                        http,
+                        db,
+                        item.mapping_id,
+                        remote_root_id,
+                        parent_rel,
+                    )
+                    .await?;
                     let rf = engine.upload(&local, &parent_id, name).await?;
                     // Now we know the brand-new remote id — register it as
                     // in-flight before any other state mutation. The poller may
@@ -307,22 +316,53 @@ async fn execute(
         Operation::DeleteRemote => {
             if let Some(rid) = &item.remote_id {
                 // Mark in-flight so the poller's `removed` event doesn't
-                // re-enqueue a `DeleteLocal` for the file we're already
+                // re-enqueue a `DeleteLocal` for the item we're already
                 // deleting end-to-end.
                 let _guard = in_flight.mark(rid);
-                engine.delete_remote(rid).await?;
+                match item.kind {
+                    items::ItemKind::Dir => engine.remove_dir_remote(rid).await?,
+                    items::ItemKind::File => engine.delete_remote(rid).await?,
+                }
             }
             items::delete(db.connection(), item.id).await?;
         }
 
         Operation::DeleteLocal => {
             let local = local_root.join(&item.relative_path);
-            match tokio::fs::remove_file(&local).await {
+            // A directory is removed recursively; its children's sync_items are
+            // dropped by their own delete events / the start-up reconcile.
+            let res = match item.kind {
+                items::ItemKind::Dir => tokio::fs::remove_dir_all(&local).await,
+                items::ItemKind::File => tokio::fs::remove_file(&local).await,
+            };
+            match res {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(Error::Io(e)),
             }
             items::delete(db.connection(), item.id).await?;
+        }
+
+        Operation::CreateDirRemote => {
+            // Idempotent: `ensure_remote_folder` walks the chain, creates only
+            // missing segments via the engine, and persists each (including this
+            // folder) as a kind='dir' sync_item with its remote_id. Passing the
+            // item's full relative path makes the folder itself the leaf segment.
+            ensure_remote_folder(
+                engine,
+                http,
+                db,
+                item.mapping_id,
+                remote_root_id,
+                &item.relative_path,
+            )
+            .await?;
+        }
+
+        Operation::CreateDirLocal => {
+            let local = local_root.join(&item.relative_path);
+            tokio::fs::create_dir_all(&local).await.map_err(Error::Io)?;
+            items::set_state(db.connection(), item.id, items::ItemState::Synced).await?;
         }
 
         Operation::RenameRemote => {
@@ -340,7 +380,15 @@ async fn execute(
                 return Ok(());
             };
             let (parent_rel, new_name) = split_parent(new_rel);
-            let new_parent_id = ensure_remote_folder(http, remote_root_id, parent_rel).await?;
+            let new_parent_id = ensure_remote_folder(
+                engine,
+                http,
+                db,
+                item.mapping_id,
+                remote_root_id,
+                parent_rel,
+            )
+            .await?;
             // Mark in-flight: Drive emits a change event for the renamed file,
             // and even though our md5 echo check would handle it, suppressing
             // the round-trip saves the poller a redundant `apply_remote` walk.
@@ -349,9 +397,9 @@ async fn execute(
             items::set_relative_path(db.connection(), item.id, new_rel).await?;
         }
 
-        // The remaining variants (RenameLocal / CreateDir* / MarkConflict) are
-        // not produced by the current reconciler. We log + drop the op so a
-        // stale row from an earlier version doesn't wedge the queue.
+        // The remaining variants (RenameLocal / MarkConflict) are not produced
+        // by the current reconciler. We log + drop the op so a stale row from an
+        // earlier version doesn't wedge the queue.
         other => {
             tracing::warn!(?other, op_id = op.id.0, "no dispatcher path for op");
         }
@@ -359,30 +407,76 @@ async fn execute(
     Ok(())
 }
 
-/// Walk `parent_rel` segment by segment under `root_id`, creating Drive folders
-/// on the fly. Mirrors `reconcile::ensure_remote_folder` but stateless — for the
-/// MVP we re-walk the chain every time; the test set is small. Caching is a
-/// follow-up.
-async fn ensure_remote_folder(http: &DriveHttp, root_id: &str, parent_rel: &str) -> Result<String> {
+/// Walk `parent_rel` segment by segment under `root_id`, creating missing Drive
+/// folders via the engine and persisting each as a `kind='dir'` `sync_item`.
+///
+/// This is the single, idempotent folder-creation path: an existing segment is
+/// reused (no duplicate on Drive), a missing one is created through
+/// `engine.create_dir_remote`, and every segment is recorded in `sync_item` so a
+/// later rename/move (#7) or delete has a row to anchor to. For the MVP we
+/// re-walk the chain every time; the test set is small. Caching is a follow-up.
+async fn ensure_remote_folder(
+    engine: &Arc<dyn SyncEngine>,
+    http: &DriveHttp,
+    db: &Db,
+    mapping_id: MappingId,
+    root_id: &str,
+    parent_rel: &str,
+) -> Result<String> {
     if parent_rel.is_empty() {
         return Ok(root_id.to_owned());
     }
     let mut current = root_id.to_owned();
+    let mut cumulative = String::new();
     for seg in parent_rel.split('/').filter(|s| !s.is_empty()) {
+        cumulative = if cumulative.is_empty() {
+            seg.to_owned()
+        } else {
+            format!("{cumulative}/{seg}")
+        };
         let children = crate::drive::metadata::list_children(http, &current).await?;
         let existing = children
             .into_iter()
             .find(|c| c.is_folder() && c.name == seg);
         current = match existing {
             Some(f) => f.id,
-            None => {
-                crate::drive::metadata::create_folder(http, &current, seg)
-                    .await?
-                    .id
-            }
+            None => engine.create_dir_remote(&current, seg).await?.id,
         };
+        persist_dir(db, mapping_id, &cumulative, &current).await?;
     }
     Ok(current)
+}
+
+/// Record a folder as a `kind='dir'` `sync_item` (insert if absent, otherwise
+/// ensure its `remote_id` is set). Keyed by `(mapping_id, relative_path)`, whose
+/// UNIQUE index makes a racing insert from the poller's `apply_remote` fail
+/// rather than create a duplicate.
+async fn persist_dir(db: &Db, mapping_id: MappingId, rel: &str, remote_id: &str) -> Result<()> {
+    match items::get_by_relative_path(db.connection(), mapping_id, rel).await? {
+        Some(existing) => {
+            if existing.remote_id.as_deref() != Some(remote_id) {
+                items::set_remote_id(db.connection(), existing.id, remote_id).await?;
+            }
+        }
+        None => {
+            items::insert(
+                db.connection(),
+                &items::NewSyncItem {
+                    mapping_id,
+                    relative_path: rel.to_owned(),
+                    kind: items::ItemKind::Dir,
+                    remote_id: Some(remote_id.to_owned()),
+                    size: None,
+                    md5: None,
+                    local_inode: None,
+                    last_synced_at: unix_now(),
+                    state: items::ItemState::Synced,
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 fn split_parent(rel: &str) -> (&str, &str) {
