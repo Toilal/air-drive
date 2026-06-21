@@ -1,7 +1,7 @@
 # 020 — Propagate empty directories (folders as persistent items)
 
 - **Priority:** 🟠 high
-- **Status:** In progress — engine + continuous sync done; initial reconciliation pending
+- **Status:** Implemented — pending e2e verification against real Drive
 - **Issue:** [#1](https://github.com/Toilal/air-drive/issues/1)
 - **Area:** reconcile, state, engine
 
@@ -91,10 +91,16 @@ first sync of a tree with empty folders converges.
   both `RcloneEngine` and `HttpEngine`.
 - [x] Integration tests: empty-dir create both directions + local dir delete
   (`continuous_sync.rs` `us2_6_*`).
-- [ ] **Initial reconciliation** (`reconcile/mod.rs`): a first sync of a tree
-  containing empty folders creates them on both sides. ← step 3, remaining.
-- [ ] Remote-side dir delete → local `remove_dir_all` (code path exists via
-  `apply_remote` `removed` → `DeleteLocal`; add an integration test in step 3).
+- [x] **Initial reconciliation** (`reconcile/mod.rs`): a first sync of a tree
+  containing empty folders creates them on both sides, persisting `kind='dir'`
+  rows (`initial_sync.rs` `us1_6_*`, including a DB assertion on the rows).
+- [x] Remote-side dir delete → local `remove_dir_all`, including a **non-empty**
+  folder whose whole subtree is removed (`continuous_sync.rs`
+  `us2_6_remote_dir_delete_*`).
+
+Remaining before deletion of this entry: e2e verification against real Drive
+(the `RcloneEngine` dir methods are exercised only there; they delegate to the
+same `drive::metadata`/`DriveHttp` paths the mocked suite covers).
 
 ## Unblocks
 

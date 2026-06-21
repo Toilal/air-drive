@@ -605,6 +605,108 @@ async fn us2_6_local_dir_delete_propagates() {
 }
 
 // ---------------------------------------------------------------------------
+// a folder trashed on Drive is removed locally
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_6_remote_dir_delete_propagates_locally() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(&fx, &mock, &root_id, &[]);
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Create a remote folder; let the daemon mirror it locally.
+    let dir_id = mock.insert_folder(Some(&root_id), "remotedir");
+    let appeared = wait_until(T_REMOTE_TO_LOCAL, || async {
+        fx.local_dir.join("remotedir").is_dir()
+    })
+    .await;
+    assert!(
+        appeared,
+        "precondition: remote dir mirrored locally; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Trash it on Drive — the local directory must be removed.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.remove(&dir_id);
+        st.change_log.push(common::ChangeEntry {
+            file_id: dir_id.clone(),
+            removed: true,
+        });
+    }
+
+    let gone = wait_until(T_REMOTE_TO_LOCAL, || async {
+        !fx.local_dir.join("remotedir").exists()
+    })
+    .await;
+    assert!(
+        gone,
+        "local dir should be removed within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// trashing a NON-EMPTY folder on Drive removes the whole subtree locally
+// (exercises the dispatcher's recursive remove_dir_all on DeleteLocal/dir)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_6_remote_nonempty_dir_delete_removes_subtree_locally() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(&fx, &mock, &root_id, &[]);
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // A folder with a file inside, both created on Drive and mirrored locally.
+    let dir_id = mock.insert_folder(Some(&root_id), "box");
+    mock.insert_file(Some(&dir_id), "inside.txt", b"contents");
+
+    let mirrored = wait_until(T_REMOTE_TO_LOCAL, || async {
+        fx.local_dir.join("box/inside.txt").is_file()
+    })
+    .await;
+    assert!(
+        mirrored,
+        "precondition: box/inside.txt mirrored locally; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Trash only the FOLDER on Drive (not the child) — the local side must remove
+    // the whole subtree, child included, via remove_dir_all.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.remove(&dir_id);
+        st.change_log.push(common::ChangeEntry {
+            file_id: dir_id.clone(),
+            removed: true,
+        });
+    }
+
+    let gone = wait_until(T_REMOTE_TO_LOCAL, || async {
+        !fx.local_dir.join("box").exists()
+    })
+    .await;
+    assert!(
+        gone,
+        "the non-empty local dir (and its child) should be removed within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // Seeding helpers — applied via sync rusqlite using the production schema.
 // ---------------------------------------------------------------------------
 

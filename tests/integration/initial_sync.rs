@@ -310,6 +310,103 @@ async fn us1_5_overlapping_content() {
 }
 
 // ---------------------------------------------------------------------------
+// empty directories propagate during the initial pass (both directions)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us1_6_initial_sync_creates_empty_remote_dirs_locally() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    // Empty folders on Drive — no files to drag them along.
+    mock.insert_folder(Some(&root_id), "emptydir");
+    let parent = mock.insert_folder(Some(&root_id), "parent");
+    mock.insert_folder(Some(&parent), "child");
+
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_account(&fx, "alice@example.com");
+    seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
+
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start").arg("--initial-sync");
+    let (code, _stdout, stderr) = run(cmd);
+    assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
+
+    assert!(
+        fx.local_dir.join("emptydir").is_dir(),
+        "empty remote dir should be created locally"
+    );
+    assert!(
+        fx.local_dir.join("parent/child").is_dir(),
+        "nested empty remote dir should be created locally"
+    );
+}
+
+#[tokio::test]
+async fn us1_6_initial_sync_creates_empty_local_dirs_on_drive() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    // Empty local directories (nothing inside them).
+    std::fs::create_dir_all(fx.local_dir.join("emptylocal")).unwrap();
+    std::fs::create_dir_all(fx.local_dir.join("a/b")).unwrap();
+    seed_account(&fx, "alice@example.com");
+    seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
+
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start").arg("--initial-sync");
+    let (code, _stdout, stderr) = run(cmd);
+    assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
+
+    {
+        let st = mock.state.lock().unwrap();
+        let is_child_folder = |name: &str, parent: &str| {
+            st.files
+                .values()
+                .any(|f| f.is_folder() && f.name == name && f.parent_id.as_deref() == Some(parent))
+        };
+        assert!(
+            is_child_folder("emptylocal", root_id.as_str()),
+            "empty local dir should be created on Drive"
+        );
+        let a = st
+            .files
+            .values()
+            .find(|f| {
+                f.is_folder() && f.name == "a" && f.parent_id.as_deref() == Some(root_id.as_str())
+            })
+            .expect("dir 'a' should exist on Drive");
+        assert!(
+            is_child_folder("b", a.id.as_str()),
+            "nested dir a/b should exist on Drive under 'a'"
+        );
+    }
+
+    // Directories must be persisted as kind='dir' sync_item rows carrying their
+    // Drive id — this is the anchor folder rename/move (#7) relies on.
+    with_state_db(&fx, |conn| {
+        for rel in ["emptylocal", "a", "a/b"] {
+            let (kind, remote_id): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT kind, remote_id FROM sync_item WHERE relative_path = ?1",
+                    rusqlite::params![rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or_else(|e| panic!("sync_item row for {rel} missing: {e}"));
+            assert_eq!(kind, "dir", "{rel} should be kind='dir'");
+            assert!(
+                remote_id.is_some(),
+                "{rel} dir row must carry a remote_id, got NULL"
+            );
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Pre-seeding helpers (sync rusqlite — simpler than spinning up the async wrapper).
 // ---------------------------------------------------------------------------
 

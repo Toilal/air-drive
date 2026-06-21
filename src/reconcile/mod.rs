@@ -1,9 +1,11 @@
 //! Reconciler: turn watcher + remote-change events into atomic `SyncEngine` operations.
 //!
 //! For the MVP only the **initial** reconciliation pass lives here. It walks
-//! the local tree and the remote tree once, classifies every leaf as `local-only`,
-//! `remote-only`, or `both`, and dispatches `upload` / `download` to the configured
-//! [`SyncEngine`] until the queue drains. After convergence it captures a Drive
+//! the local tree and the remote tree once, reconciles directories (so empty
+//! folders propagate and every dir is persisted as a `kind='dir'` `sync_item`),
+//! then classifies every leaf as `local-only`, `remote-only`, or `both`, and
+//! dispatches `upload` / `download` to the configured [`SyncEngine`] until the
+//! queue drains. After convergence it captures a Drive
 //! `changes.getStartPageToken` baseline so the continuous-sync loop only sees
 //! events that happened *after* the initial pass.
 //!
@@ -85,6 +87,39 @@ pub async fn initial(
     remote_folder_ids.insert(String::new(), remote_root_id.to_owned());
     for r in remote_entries.iter().filter(|e| e.is_dir) {
         remote_folder_ids.insert(r.relative_path.clone(), r.id.clone());
+    }
+
+    // 0. Reconcile directories first. The union of local + remote dirs is walked
+    //    parent-first (a parent path is a strict prefix of its children, so it
+    //    sorts before them). Each dir is created on whichever side lacks it and
+    //    persisted as a kind='dir' sync_item — this is how *empty* folders
+    //    propagate, and it gives folder rename/move (#7) a row to anchor to.
+    let mut dir_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in local_entries.iter().filter(|e| e.is_dir) {
+        dir_paths.insert(e.relative_path.clone());
+    }
+    for e in remote_entries.iter().filter(|e| e.is_dir) {
+        dir_paths.insert(e.relative_path.clone());
+    }
+    for dir in &dir_paths {
+        let (parent_rel, name) = split_parent(dir);
+        let remote_id = match remote_folder_ids.get(dir) {
+            Some(id) => id.clone(),
+            None => {
+                // Local-only dir: create it on Drive under its (already-processed)
+                // parent, then cache the new id for any children.
+                let parent_id = remote_folder_ids
+                    .get(parent_rel)
+                    .cloned()
+                    .unwrap_or_else(|| remote_root_id.to_owned());
+                let created = engine.create_dir_remote(&parent_id, name).await?;
+                remote_folder_ids.insert(dir.clone(), created.id.clone());
+                created.id
+            }
+        };
+        // Remote-only dir: materialise it locally (idempotent if already present).
+        tokio::fs::create_dir_all(local_root.join(dir)).await?;
+        record_synced_dir(db, mapping_id, dir, &remote_id).await?;
     }
 
     // 1. Local-only files → upload (creating remote parent folders as needed).
@@ -306,6 +341,30 @@ fn split_parent(rel: &str) -> (&str, &str) {
         Some((parent, name)) => (parent, name),
         None => ("", rel),
     }
+}
+
+async fn record_synced_dir(
+    db: &Db,
+    mapping_id: MappingId,
+    relative_path: &str,
+    remote_id: &str,
+) -> Result<()> {
+    items::insert(
+        db.connection(),
+        &NewSyncItem {
+            mapping_id,
+            relative_path: relative_path.to_owned(),
+            kind: ItemKind::Dir,
+            remote_id: Some(remote_id.to_owned()),
+            size: None,
+            md5: None,
+            local_inode: None,
+            last_synced_at: unix_now(),
+            state: ItemState::Synced,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn record_synced_item(
