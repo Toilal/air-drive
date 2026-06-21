@@ -407,6 +407,52 @@ async fn us1_6_initial_sync_creates_empty_local_dirs_on_drive() {
 }
 
 // ---------------------------------------------------------------------------
+// parent directories of nested files are persisted as kind='dir' rows
+// (deterministic: the initial pass is one-shot, no inotify race) — this is the
+// anchor folder rename/move (#7) relies on, for both remote-only and local-only
+// directory trees.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us1_6_initial_sync_persists_parent_dirs_of_nested_files() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    // Remote-only nested file: parent "docs" exists only on Drive.
+    let docs = mock.insert_folder(Some(&root_id), "docs");
+    mock.insert_file(Some(&docs), "spec.txt", b"spec body");
+
+    // Local-only nested file: parent "nested" exists only locally.
+    let fx = fs_fixture();
+    fx.populate_local(&[("nested/one.txt", b"one")]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_account(&fx, "alice@example.com");
+    seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
+
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start").arg("--initial-sync");
+    let (code, _stdout, stderr) = run(cmd);
+    assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
+
+    // Both parent dirs must be persisted as kind='dir' with a remote_id, whether
+    // they came from the remote walk or were created during a local upload.
+    with_state_db(&fx, |conn| {
+        for rel in ["docs", "nested"] {
+            let (kind, remote_id): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT kind, remote_id FROM sync_item WHERE relative_path = ?1",
+                    rusqlite::params![rel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or_else(|e| panic!("sync_item row for dir {rel} missing: {e}"));
+            assert_eq!(kind, "dir", "{rel} should be kind='dir'");
+            assert!(remote_id.is_some(), "{rel} dir row must carry a remote_id");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Pre-seeding helpers (sync rusqlite — simpler than spinning up the async wrapper).
 // ---------------------------------------------------------------------------
 

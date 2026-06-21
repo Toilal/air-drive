@@ -562,6 +562,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_and_remove_dir_remote_go_through_http_not_rclone() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // RcloneEngine's directory methods are metadata ops that use `self.http`
+        // (DriveHttp), bypassing the rclone subprocess — so they're testable
+        // against a mock HTTP server without rclone present. The dummy binary
+        // path below is never executed.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "folder-123",
+                "name": "newdir",
+                "mimeType": "application/vnd.google-apps.folder",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/files/folder-123"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let token = Arc::new(StaticToken::new("t"));
+        let http = DriveHttp::with_bases(token.clone(), server.uri(), server.uri()).unwrap();
+        let engine = RcloneEngine::new(
+            dummy_binary(),
+            token,
+            None,
+            None,
+            PathBuf::from("/tmp/root"),
+            http,
+        );
+
+        let rf = engine
+            .create_dir_remote("parent-id", "newdir")
+            .await
+            .unwrap();
+        assert_eq!(rf.id, "folder-123");
+        assert_eq!(rf.mime, "application/vnd.google-apps.folder");
+
+        // Must not error — exercises remove_dir_remote's files.delete path.
+        engine.remove_dir_remote("folder-123").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn base_command_omits_client_secret_when_absent() {
         let engine = RcloneEngine::new(
             dummy_binary(),
