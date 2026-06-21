@@ -16,7 +16,9 @@
 //!
 //! - **upload**: `rclone copyto <local> airdrive:<parent_id>/<name> --drive-root-folder-id <parent_id>`
 //! - **download**: stages via [`super::staging`] then `rclone copyto airdrive:<id> <stage>`
-//! - **move_remote**: `rclone moveto airdrive:<old_id> airdrive:<new_parent>/<new_name>`
+//! - **move_remote**: Drive `files.update` via `DriveHttp` (rename + reparent) —
+//!   a metadata-only op; rclone addresses Drive by path, not id, so `moveto`
+//!   cannot locate a source given only its id.
 //! - **delete_remote**: `rclone delete airdrive:<id>` (Drive trash)
 //!
 //! **Token handoff**: [`TokenProvider::rclone_token`] supplies the access token, its
@@ -347,13 +349,36 @@ impl SyncEngine for RcloneEngine {
         new_parent_id: &str,
         new_name: &str,
     ) -> Result<()> {
-        let mut cmd = self.base_command().await?;
-        cmd.arg("moveto")
-            .arg(format!("{REMOTE_NAME}:{remote_id}"))
-            .arg(format!("{REMOTE_NAME}:{new_name}"))
-            .arg("--drive-root-folder-id")
-            .arg(new_parent_id);
-        self.run(cmd).await?;
+        // A rename/move is a pure metadata change, so drive it through the Drive
+        // API (`files.update`) rather than `rclone moveto`: rclone addresses Drive
+        // by path, not id, so given only the object's id it cannot locate the
+        // source and fails with "directory not found". This mirrors the HTTP
+        // engine and the create/remove-dir paths, which also use `DriveHttp` for
+        // metadata-only operations.
+        let current =
+            crate::drive::metadata::get_file_raw(&self.http, remote_id, "id,parents").await?;
+        let old_parents: Vec<String> = current
+            .get("parents")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        let add = new_parent_id.to_owned();
+        let remove = old_parents.join(",");
+        let needs_move = !old_parents.iter().any(|p| p == new_parent_id);
+        if needs_move {
+            query.push(("addParents", &add));
+            query.push(("removeParents", &remove));
+        }
+        let body = serde_json::json!({ "name": new_name });
+        self.http
+            .patch_json(&format!("files/{remote_id}"), &query, &body)
+            .await?;
         Ok(())
     }
 
