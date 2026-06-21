@@ -99,19 +99,16 @@ async fn e2_initial_sync_uploads_via_rclone() {
     let content = b"hello from air-drive e2e";
     fx.populate_local("greeting.txt", content);
 
-    // Wire account + mapping rows so `start --initial-sync` has its prerequisites.
+    // Wire account + mapping rows so `start` has its prerequisites.
     seed_account_and_mapping(&fx);
 
     // Run the daemon. This invokes the real rclone subprocess against the real
     // Drive backend, configured via the RCLONE_CONFIG_AIRDRIVE_* env vars the
     // production code path emits.
     let mut cmd = fx.air_drive_cmd();
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
-    assert_eq!(
-        code, 0,
-        "`start --initial-sync` (upload) failed; stderr=\n{stderr}"
-    );
+    assert_eq!(code, 0, "`start` (upload) failed; stderr=\n{stderr}");
 
     // Verify the file made it through rclone → Drive by listing the run folder
     // and matching by name + md5.
@@ -149,7 +146,7 @@ async fn e3_initial_sync_downloads_via_rclone() {
     let fx = common::E2eFixture::new(cfg).await;
 
     // Stash a file directly on Drive (via the metadata + upload helpers, no
-    // rclone here) so the subsequent `start --initial-sync` is purely a
+    // rclone here) so the subsequent `start` is purely a
     // download flow.
     let content = b"remote-seeded payload";
     let metadata_doc = serde_json::json!({
@@ -167,12 +164,9 @@ async fn e3_initial_sync_downloads_via_rclone() {
 
     // The local tree is empty — initial-sync will download.
     let mut cmd = fx.air_drive_cmd();
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
-    assert_eq!(
-        code, 0,
-        "`start --initial-sync` (download) failed; stderr=\n{stderr}"
-    );
+    assert_eq!(code, 0, "`start` (download) failed; stderr=\n{stderr}");
 
     let local_path = fx.local_dir.join("seeded.txt");
     let got = std::fs::read(&local_path).unwrap_or_else(|e| {
@@ -201,11 +195,11 @@ async fn e4_initial_sync_creates_empty_local_dir_on_drive() {
     seed_account_and_mapping(&fx);
 
     let mut cmd = fx.air_drive_cmd();
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(
         code, 0,
-        "`start --initial-sync` (empty dir upload) failed; stderr=\n{stderr}"
+        "`start` (empty dir upload) failed; stderr=\n{stderr}"
     );
 
     let children = metadata::list_children(&fx.drive, &fx.run_folder_id)
@@ -238,11 +232,11 @@ async fn e5_initial_sync_creates_empty_drive_dir_locally() {
     seed_account_and_mapping(&fx);
 
     let mut cmd = fx.air_drive_cmd();
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(
         code, 0,
-        "`start --initial-sync` (empty dir download) failed; stderr=\n{stderr}"
+        "`start` (empty dir download) failed; stderr=\n{stderr}"
     );
 
     assert!(
@@ -269,12 +263,9 @@ async fn e6_initial_sync_uploads_nested_file_into_created_dir() {
     seed_account_and_mapping(&fx);
 
     let mut cmd = fx.air_drive_cmd();
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
-    assert_eq!(
-        code, 0,
-        "`start --initial-sync` (nested upload) failed; stderr=\n{stderr}"
-    );
+    assert_eq!(code, 0, "`start` (nested upload) failed; stderr=\n{stderr}");
 
     // The `docs` folder must exist under the run folder…
     let top = metadata::list_children(&fx.drive, &fx.run_folder_id)
@@ -330,17 +321,26 @@ async fn e7_local_dir_rename_propagates_via_rclone() {
     // running so the subsequent local rename is handled as a live event.
     let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
 
-    // Wait for the initial sync to create `docs` on Drive, then capture its id.
-    let appeared = common::wait_until(Duration::from_secs(90), || async {
-        metadata::list_children(&fx.drive, &fx.run_folder_id)
+    // Wait until `docs/spec.txt` has fully landed on Drive — not just the `docs`
+    // folder. Renaming the local dir while the file upload is still in flight
+    // would pull the source out from under rclone mid-copy ("object not found").
+    let ready = common::wait_until(Duration::from_secs(90), || async {
+        let docs = metadata::list_children(&fx.drive, &fx.run_folder_id)
             .await
-            .map(|cs| cs.iter().any(|c| c.is_folder() && c.name == "docs"))
-            .unwrap_or(false)
+            .ok()
+            .and_then(|cs| cs.into_iter().find(|c| c.is_folder() && c.name == "docs"));
+        match docs {
+            Some(d) => metadata::list_children(&fx.drive, &d.id)
+                .await
+                .map(|cs| cs.iter().any(|c| c.name == "spec.txt"))
+                .unwrap_or(false),
+            None => false,
+        }
     })
     .await;
     assert!(
-        appeared,
-        "initial sync should create `docs` on Drive; alive? {:?}",
+        ready,
+        "initial sync should upload docs/spec.txt to Drive; alive? {:?}",
         daemon.poll_alive()
     );
     let docs_id = metadata::list_children(&fx.drive, &fx.run_folder_id)
@@ -592,12 +592,9 @@ async fn e10_native_google_doc_becomes_local_shortcut() {
     // The local tree is empty — initial-sync must represent the native doc as a
     // `.gdoc` shortcut file rather than skip it silently (#3).
     let mut cmd = fx.air_drive_cmd();
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
-    assert_eq!(
-        code, 0,
-        "`start --initial-sync` (native doc) failed; stderr=\n{stderr}"
-    );
+    assert_eq!(code, 0, "`start` (native doc) failed; stderr=\n{stderr}");
 
     // A `Meeting Notes.gdoc` shortcut must exist locally, carrying the doc id and
     // a docs.google.com URL that targets it.

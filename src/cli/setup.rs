@@ -43,7 +43,7 @@ pub async fn run(
     Err(Error::Config(
         "`air-drive setup` interactive mode is not yet implemented in this MVP. \
          Run `air-drive link`, then `air-drive map <local> <remote>`, then \
-         `air-drive start --initial-sync`. Pass `--install-service` to install \
+         `air-drive start`. Pass `--install-service` to install \
          only the systemd user unit, or `--uninstall-service` to remove it."
             .into(),
     ))

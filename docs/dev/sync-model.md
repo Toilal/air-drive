@@ -89,8 +89,10 @@ files). The mime → extension/URL mapping lives in `reconcile/shortcut.rs`.
 
 ## Initial reconciliation
 
-The one-shot initial pass lives in `reconcile/mod.rs` and runs on
-`start --initial-sync` when the Drive change cursor is empty. It:
+The one-shot initial pass lives in `reconcile/mod.rs` and runs automatically on
+the first `start` of a mapping, i.e. when the Drive change cursor is empty (on an
+interactive terminal the daemon confirms first; see
+[CLI reference](../user/cli.md#start)). It:
 
 1. Walks the local tree and the remote tree once.
 2. Classifies every leaf as `local-only`, `remote-only`, or `both`.

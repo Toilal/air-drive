@@ -202,7 +202,10 @@ impl E2eFixture {
     /// `Command::output()` and would hang on the continuous loop otherwise.
     pub fn air_drive_cmd(&self) -> StdCommand {
         let mut cmd = StdCommand::cargo_bin("air-drive").expect("cargo-built binary");
-        cmd.arg("--config-dir")
+        // Null stdin → the first-time `start` initial-reconciliation prompt takes
+        // its non-interactive auto path instead of blocking on a TTY.
+        cmd.stdin(std::process::Stdio::null())
+            .arg("--config-dir")
             .arg(&self.config_dir)
             .env("RUST_LOG", "info")
             .env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "1");
@@ -337,12 +340,10 @@ impl DaemonProcess {
         let mut cmd: tokio::process::Command = fx.air_drive_cmd().into();
         cmd.env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "0");
         cmd.arg("start");
-        // The harness always starts from a fresh config dir (empty change cursor),
-        // and the daemon refuses a first-time continuous start without an explicit
-        // initial pass ("first-time start requires --initial-sync"). Every
-        // continuous-daemon scenario seeds local/remote state it then expects the
-        // daemon to reconcile, so the initial sync is exactly what they want.
-        cmd.arg("--initial-sync");
+        // A fresh config dir has an empty change cursor, so this first start runs
+        // the initial reconciliation automatically (stdin is null → non-interactive,
+        // no prompt). That is exactly what the continuous-daemon scenarios want:
+        // upload/download the seed state, then stay alive for live events.
         for a in extra_args {
             cmd.arg(a);
         }

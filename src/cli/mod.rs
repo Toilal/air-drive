@@ -73,10 +73,11 @@ pub enum Command {
         remote_folder: String,
     },
     /// Run the daemon in the foreground.
+    ///
+    /// On the first start of a mapping (empty `drive_change_cursor`) the daemon
+    /// performs the initial reconciliation automatically; on an interactive
+    /// terminal it asks first so a wrong folder can be vetoed.
     Start {
-        /// Perform initial reconciliation if `drive_change_cursor` is empty.
-        #[arg(long)]
-        initial_sync: bool,
         /// Override `daemon.remote_poll_interval_seconds` (clamped to 10..=60).
         #[arg(long, value_name = "SECONDS")]
         remote_poll_interval: Option<u64>,
@@ -98,7 +99,7 @@ pub enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
-    /// Interactive first-time setup: link → map → start --initial-sync.
+    /// Interactive first-time setup: link → map → start.
     ///
     /// `--install-service` and `--uninstall-service` manage the systemd user
     /// unit and are mutually exclusive.
@@ -171,13 +172,11 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
             remote_folder,
         } => map::run(cli.config_dir.as_deref(), &cfg, local_path, remote_folder).await,
         Command::Start {
-            initial_sync,
             remote_poll_interval,
         } => {
             start::run(
                 cli.config_dir.as_deref(),
                 &cfg,
-                initial_sync,
                 remote_poll_interval,
                 cli.no_download_rclone,
             )
@@ -254,21 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_start_with_initial_sync_and_poll_interval() {
-        let cli = Cli::try_parse_from([
-            "air-drive",
-            "start",
-            "--initial-sync",
-            "--remote-poll-interval",
-            "20",
-        ])
-        .expect("start parses");
+    fn parses_start_with_poll_interval() {
+        let cli = Cli::try_parse_from(["air-drive", "start", "--remote-poll-interval", "20"])
+            .expect("start parses");
         match cli.command {
             Command::Start {
-                initial_sync,
                 remote_poll_interval,
             } => {
-                assert!(initial_sync);
                 assert_eq!(remote_poll_interval, Some(20));
             }
             _ => panic!("expected Start variant"),

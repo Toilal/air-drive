@@ -103,7 +103,7 @@ async fn auto_create_root_true_creates_missing_local_root() {
     seed_account_and_mapping(&fx, &target.to_string_lossy(), &root_id);
 
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
 
     assert_eq!(
@@ -130,7 +130,7 @@ async fn auto_create_root_false_errors_actionably() {
     seed_account_and_mapping(&fx, &target.to_string_lossy(), &root_id);
 
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
 
     assert_ne!(code, 0, "daemon should refuse to start; stderr=\n{stderr}");

@@ -167,7 +167,7 @@ async fn us1_3_drive_to_local_initial_sync() {
     seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
 
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
 
@@ -208,7 +208,7 @@ async fn us1_4_local_to_drive_initial_sync() {
     seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
 
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
 
@@ -280,7 +280,7 @@ async fn us1_5_overlapping_content() {
 
     let uploads_before = mock.upload_count().await;
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
     let uploads_after = mock.upload_count().await;
@@ -329,7 +329,7 @@ async fn us1_6_initial_sync_creates_empty_remote_dirs_locally() {
     seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
 
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
 
@@ -358,7 +358,7 @@ async fn us1_6_initial_sync_creates_empty_local_dirs_on_drive() {
     seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
 
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
 
@@ -431,7 +431,7 @@ async fn us1_6_initial_sync_persists_parent_dirs_of_nested_files() {
     seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
 
     let mut cmd = air_drive_cmd(&fx, &mock);
-    cmd.arg("start").arg("--initial-sync");
+    cmd.arg("start");
     let (code, _stdout, stderr) = run(cmd);
     assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
 

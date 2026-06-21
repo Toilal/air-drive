@@ -22,12 +22,10 @@ use crate::state::cursor;
 use crate::state::mapping::FolderMapping;
 use crate::state::{Db, accounts, mapping};
 
-/// Run the `start` subcommand. Honours the `--initial-sync` flag and the
-/// `--remote-poll-interval` override.
+/// Run the `start` subcommand. Honours the `--remote-poll-interval` override.
 pub async fn run(
     config_dir_override: Option<&Path>,
     cfg: &Config,
-    initial_sync: bool,
     remote_poll_interval: Option<u64>,
     no_download_rclone: bool,
 ) -> Result<ExitCode> {
@@ -56,15 +54,29 @@ pub async fn run(
         ));
     };
 
-    // 3. Initial-sync gate: if the cursor has never been set and --initial-sync
-    //    isn't passed, refuse.
+    // 3. First-time gate. With no change cursor yet, this start performs the
+    //    initial full reconciliation — the only way to bootstrap a mapping, so
+    //    it runs automatically when non-interactive (systemd, scripts). An
+    //    interactive operator is asked first, so a wrong `local_path` or a
+    //    surprise full download can be vetoed before any bytes move.
     let cursor_exists = cursor::get(db.connection(), mapping_row.id)
         .await?
         .is_some();
-    if !cursor_exists && !initial_sync {
-        return Err(Error::Config(
-            "first-time start requires --initial-sync".into(),
-        ));
+    let do_initial = !cursor_exists;
+    if do_initial {
+        let remote_label = mapping_row
+            .remote_folder_name
+            .as_deref()
+            .unwrap_or(mapping_row.remote_folder_id.as_str());
+        let proceed = interactive::confirm_or_auto(&format!(
+            "No sync state yet — perform the initial reconciliation between local \
+             `{}` and Drive folder `{remote_label}`?",
+            mapping_row.local_path
+        ))?;
+        if !proceed {
+            tracing::info!("initial reconciliation declined; not starting the daemon");
+            return Ok(ExitCode::Ok);
+        }
     }
 
     // 4. Build the engine + HTTP client.
@@ -96,7 +108,7 @@ pub async fn run(
     crate::engine::staging::cleanup_orphans(&local_root)?;
 
     // 5. First-time initial sync.
-    if initial_sync && !cursor_exists {
+    if do_initial {
         reconcile::initial(
             &http,
             engine.clone(),
@@ -109,10 +121,9 @@ pub async fn run(
     }
 
     // Test-only escape hatch: integration tests that exercise only the initial-sync
-    // path (`tests/integration/initial_sync.rs`) invoke `start --initial-sync` and
-    // wait for the binary to exit via `Command::output()`. They don't want the
-    // continuous loop to kick in. The env var is documented in
-    // `tests/integration/common/mod.rs`.
+    // path (`tests/integration/initial_sync.rs`) run `start` and wait for the binary
+    // to exit via `Command::output()`. They don't want the continuous loop to kick
+    // in. The env var is documented in `tests/integration/common/mod.rs`.
     if std::env::var("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC").as_deref() == Ok("1") {
         return Ok(ExitCode::Ok);
     }

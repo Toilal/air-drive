@@ -961,7 +961,11 @@ pub fn fs_fixture() -> FsFixture {
 /// - `RUST_LOG=info` so test output captures useful diagnostics
 pub fn air_drive_cmd(fx: &FsFixture, mock: &DriveMock) -> StdCommand {
     let mut cmd = StdCommand::cargo_bin("air-drive").expect("cargo-built binary");
-    cmd.arg("--config-dir")
+    // Detach stdin so a first-time `start` (which now asks before the initial
+    // reconciliation on a TTY) takes the non-interactive auto path instead of
+    // blocking on a prompt when `cargo test` is run from a terminal.
+    cmd.stdin(std::process::Stdio::null())
+        .arg("--config-dir")
         .arg(&fx.config_dir)
         .arg("--no-download-rclone")
         .env("AIR_DRIVE_DRIVE_BASE_URL", mock.drive_base_url())

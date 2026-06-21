@@ -56,11 +56,16 @@ air-drive map <LOCAL_PATH> <REMOTE_FOLDER>
 Run the daemon in the foreground.
 
 ```sh
-air-drive start [--initial-sync] [--remote-poll-interval <SECONDS>]
+air-drive start [--remote-poll-interval <SECONDS>]
 ```
 
-- `--initial-sync` — perform the initial reconciliation pass if the Drive change
-  cursor is empty.
+On the **first** start of a mapping (the Drive change cursor is empty), the
+daemon performs the initial reconciliation pass automatically. On an interactive
+terminal it asks for confirmation first — so a wrong `local_path` or an
+unexpected full download can be vetoed — and proceeds without prompting when
+stdin is not a TTY (systemd, scripts, CI). Declining at the prompt exits without
+starting.
+
 - `--remote-poll-interval <SECONDS>` — override
   `[daemon].remote_poll_interval_seconds` (clamped to `10..=60`).
 
@@ -101,8 +106,8 @@ air-drive unlink [-y|--yes]
 
 ### `setup`
 
-Interactive first-time setup (`link` → `map` → `start --initial-sync`), and
-systemd service management.
+Interactive first-time setup (`link` → `map` → `start`), and systemd service
+management.
 
 ```sh
 air-drive setup [--install-service | --uninstall-service]

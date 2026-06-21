@@ -11,7 +11,9 @@
 //!   surface an actionable error so the operator can fix the config and retry.
 //!
 //! [`confirm`] encapsulates that policy: TTY-only y/N prompt, default `No`,
-//! returns `false` whenever the answer cannot be obtained.
+//! returns `false` whenever the answer cannot be obtained. [`confirm_or_auto`]
+//! is its mirror for actions that are the normal next step and safe to automate:
+//! it proceeds automatically when non-interactive and only lets a TTY user veto.
 
 use std::io::{BufRead, IsTerminal, Write};
 
@@ -42,4 +44,31 @@ pub fn confirm(question: &str) -> Result<bool> {
     }
     let answer = line.trim().to_ascii_lowercase();
     Ok(answer == "y" || answer == "yes")
+}
+
+/// Ask a yes/no question that defaults to **proceeding** — the inverse policy of
+/// [`confirm`]. Use it for an action that is the normal, safe next step but that
+/// an interactive operator may still want to veto.
+///
+/// - `Ok(true)` when stdin is **not** a TTY (systemd, piped, CI): take the action
+///   automatically, since there is no one to ask and it is the expected path.
+/// - On a TTY: prompt `[Y/n]`, default Yes. Only an explicit `n` / `no` (case
+///   insensitive) returns `Ok(false)`; empty input or EOF proceeds.
+pub fn confirm_or_auto(question: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(true);
+    }
+    let mut stderr = std::io::stderr().lock();
+    write!(stderr, "{question} [Y/n]: ")?;
+    stderr.flush()?;
+
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    let n = stdin.lock().read_line(&mut line)?;
+    if n == 0 {
+        // EOF on a TTY — proceed with the default.
+        return Ok(true);
+    }
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(!(answer == "n" || answer == "no"))
 }
