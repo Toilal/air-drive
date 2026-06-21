@@ -22,6 +22,13 @@ self-skip when the required env vars are missing.
 | `e1_link_reaches_real_drive` | `air-drive link` reaches `about.user` and persists a real email. |
 | `e2_initial_sync_uploads_via_rclone` | Local file → Drive via `rclone copyto`, md5 verified through `files.list`. |
 | `e3_initial_sync_downloads_via_rclone` | File seeded on Drive → fresh local dir via `rclone copyto`, byte content verified. |
+| `e4_initial_sync_creates_empty_local_dir_on_drive` | An empty local dir is created as a folder on Drive (#1). |
+| `e5_initial_sync_creates_empty_drive_dir_locally` | An empty Drive folder is materialised locally (#1). |
+| `e6_initial_sync_uploads_nested_file_into_created_dir` | A nested file lands in a Drive folder created on the fly (dir-create + upload interplay, #1). |
+| `e7_local_dir_rename_propagates_via_rclone` | A folder renamed locally moves the same Drive folder (continuous daemon, #7). |
+| `e8_remote_dir_rename_propagates_locally` | A folder renamed on Drive moves the local dir (continuous daemon, #7). |
+| `e9_remote_trash_then_restore_does_not_duplicate` | A file trashed on Drive is removed locally; restoring re-links it with no duplicate, same id (#8). |
+| `e10_native_google_doc_becomes_local_shortcut` | A native Google Doc on Drive becomes a local `.gdoc` shortcut and is never uploaded back (#3). |
 
 ## Required env vars
 

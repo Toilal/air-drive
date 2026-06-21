@@ -26,6 +26,11 @@
 //! - **folder rename/move** — a directory renamed locally moves on Drive, and a
 //!   directory renamed on Drive moves locally, via a *continuously-running* daemon
 //!   ([`common::DaemonProcess`]) rather than the one-shot initial-sync (#7).
+//! - **trash + restore** — a file trashed on Drive is removed locally, then a
+//!   restore re-links the tombstoned row and pulls the same file back without a
+//!   duplicate (#8), exercised against the continuous daemon.
+//! - **native Google Doc** — a Doc created on Drive is materialised locally as a
+//!   `.gdoc` shortcut file (JSON pointer) and is never uploaded back (#3).
 //!
 //! See `tests/e2e/README.md` for the setup procedure (GCP project, OAuth Desktop
 //! credentials, token acquisition).
@@ -431,6 +436,201 @@ async fn e8_remote_dir_rename_propagates_locally() {
     );
 
     daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// E9 — a file trashed then restored on Drive doesn't duplicate locally (#8)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires real Drive credentials — run via `cargo test -- --ignored`"]
+async fn e9_remote_trash_then_restore_does_not_duplicate() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    let content = b"trash-restore e2e";
+    fx.populate_local("keep.txt", content);
+    seed_account_and_mapping(&fx);
+
+    // Continuous daemon: initial-sync uploads keep.txt, then it stays alive so
+    // the trash + restore that follow are handled as live remote changes.
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    // Wait for the upload to land on Drive and capture the file id.
+    let appeared = common::wait_until(Duration::from_secs(90), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "keep.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        appeared,
+        "initial sync should upload keep.txt; alive? {:?}",
+        daemon.poll_alive()
+    );
+    let file_id = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .find(|c| c.name == "keep.txt")
+        .expect("keep.txt on Drive")
+        .id;
+
+    // Trash on Drive → the daemon should remove the local copy.
+    fx.drive
+        .patch_json(
+            &format!("files/{file_id}"),
+            &[],
+            &serde_json::json!({ "trashed": true }),
+        )
+        .await
+        .expect("trash keep.txt on Drive");
+    let removed = common::wait_until(Duration::from_secs(120), || async {
+        !fx.local_dir.join("keep.txt").exists()
+    })
+    .await;
+    assert!(
+        removed,
+        "remote trash should delete the local file; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Restore on Drive → the daemon must re-link the tombstoned row and pull the
+    // SAME file back, not create a duplicate (#8).
+    fx.drive
+        .patch_json(
+            &format!("files/{file_id}"),
+            &[],
+            &serde_json::json!({ "trashed": false }),
+        )
+        .await
+        .expect("restore keep.txt on Drive");
+    let restored = common::wait_until(Duration::from_secs(120), || async {
+        fx.local_dir.join("keep.txt").is_file()
+    })
+    .await;
+    assert!(
+        restored,
+        "remote restore should re-create the local file; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Exactly one local file under the root (no `keep (1).txt` conflict copy),
+    // with the original content intact.
+    assert_eq!(
+        std::fs::read(fx.local_dir.join("keep.txt")).unwrap(),
+        content,
+        "restored content mismatch"
+    );
+    let local_keep = std::fs::read_dir(&fx.local_dir)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("keep"))
+        .count();
+    assert_eq!(
+        local_keep, 1,
+        "restore must not leave a duplicate local copy"
+    );
+
+    // And exactly one non-trashed keep.txt on Drive, still the original id.
+    let on_drive: Vec<_> = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .filter(|c| c.name == "keep.txt")
+        .collect();
+    assert_eq!(
+        on_drive.len(),
+        1,
+        "restore must not duplicate the file on Drive; saw {on_drive:?}"
+    );
+    assert_eq!(
+        on_drive[0].id, file_id,
+        "restored file should keep its original Drive id"
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// E10 — a native Google Doc is materialised as a local `.gdoc` shortcut (#3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires real Drive credentials — run via `cargo test -- --ignored`"]
+async fn e10_native_google_doc_becomes_local_shortcut() {
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    // Create a native Google Doc on Drive (no downloadable bytes) under the run
+    // folder, directly via files.create with the Docs mime type.
+    let created = fx
+        .drive
+        .post_json(
+            "files",
+            &[("fields", "id,name,mimeType")],
+            &serde_json::json!({
+                "name": "Meeting Notes",
+                "mimeType": "application/vnd.google-apps.document",
+                "parents": [fx.run_folder_id],
+            }),
+        )
+        .await
+        .expect("create native Google Doc on Drive");
+    let doc_id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("created doc has an id")
+        .to_owned();
+
+    seed_account_and_mapping(&fx);
+
+    // The local tree is empty — initial-sync must represent the native doc as a
+    // `.gdoc` shortcut file rather than skip it silently (#3).
+    let mut cmd = fx.air_drive_cmd();
+    cmd.arg("start").arg("--initial-sync");
+    let (code, _stdout, stderr) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "`start --initial-sync` (native doc) failed; stderr=\n{stderr}"
+    );
+
+    // A `Meeting Notes.gdoc` shortcut must exist locally, carrying the doc id and
+    // a docs.google.com URL that targets it.
+    let shortcut = fx.local_dir.join("Meeting Notes.gdoc");
+    let raw = std::fs::read_to_string(&shortcut).unwrap_or_else(|e| {
+        panic!(
+            "expected `Meeting Notes.gdoc` shortcut at {}: {e}",
+            shortcut.display()
+        )
+    });
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("shortcut is valid JSON");
+    assert_eq!(
+        json.get("doc_id").and_then(|v| v.as_str()),
+        Some(doc_id.as_str()),
+        "shortcut doc_id should match the Drive doc"
+    );
+    let url = json.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+    assert!(
+        url.contains("docs.google.com/document/") && url.contains(&doc_id),
+        "shortcut url should target the doc; got `{url}`"
+    );
+
+    // The shortcut is one-directional: no `.gdoc` file may be uploaded to Drive —
+    // only the original native doc should sit under the run folder.
+    let children = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder");
+    assert!(
+        !children.iter().any(|c| c.name.ends_with(".gdoc")),
+        "shortcut file must not be uploaded to Drive; saw {:?}",
+        children.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+
     fx.cleanup().await;
 }
 
