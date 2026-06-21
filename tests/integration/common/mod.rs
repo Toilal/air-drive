@@ -65,6 +65,9 @@ pub struct DriveFile {
     pub mime_type: String,
     pub content: Vec<u8>,
     pub md5: String,
+    /// Mirrors Drive's `trashed` flag. A trashed file stays in `files` (a trash
+    /// is reversible) but `changes.list` surfaces it with `trashed = true`.
+    pub trashed: bool,
 }
 
 impl DriveFile {
@@ -120,6 +123,7 @@ impl DriveState {
                 mime_type: "application/vnd.google-apps.folder".into(),
                 content: Vec::new(),
                 md5: String::new(),
+                trashed: false,
             },
         );
         self.change_log.push(ChangeEntry {
@@ -143,6 +147,7 @@ impl DriveState {
                 mime_type: guess_mime(name).into(),
                 content,
                 md5,
+                trashed: false,
             },
         );
         self.change_log.push(ChangeEntry {
@@ -171,6 +176,7 @@ impl DriveState {
                 mime_type,
                 content,
                 md5,
+                trashed: false,
             },
         );
         self.change_log.push(ChangeEntry {
@@ -755,6 +761,7 @@ fn file_to_value(f: &DriveFile) -> Value {
         v["size"] = json!(f.content.len().to_string());
         v["md5Checksum"] = json!(f.md5);
     }
+    v["trashed"] = json!(f.trashed);
     v
 }
 

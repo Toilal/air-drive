@@ -920,13 +920,14 @@ async fn us2_8_trash_then_restore_no_duplicate() {
 
     let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
 
-    // Trash on Drive — the local copy is removed but the row survives as a tombstone.
+    // Trash on Drive — a real trash keeps the file (reversible) but flips
+    // `trashed`; the change surfaces with removed=false + file.trashed=true.
     {
         let mut st = mock.state.lock().unwrap();
-        st.files.remove(&remote_id);
+        st.files.get_mut(&remote_id).unwrap().trashed = true;
         st.change_log.push(common::ChangeEntry {
             file_id: remote_id.clone(),
-            removed: true,
+            removed: false,
         });
     }
     let gone = wait_until(T_REMOTE_TO_LOCAL, || async {
@@ -939,20 +940,10 @@ async fn us2_8_trash_then_restore_no_duplicate() {
         daemon.poll_alive()
     );
 
-    // Restore on Drive: same id + same content reappear.
+    // Restore from trash: clear `trashed` + log the change (untrash).
     {
         let mut st = mock.state.lock().unwrap();
-        st.files.insert(
-            remote_id.clone(),
-            common::DriveFile {
-                id: remote_id.clone(),
-                parent_id: Some(root_id.clone()),
-                name: "doc.txt".into(),
-                mime_type: "text/plain".into(),
-                content: content.to_vec(),
-                md5: common::hex_md5(content),
-            },
-        );
+        st.files.get_mut(&remote_id).unwrap().trashed = false;
         st.change_log.push(common::ChangeEntry {
             file_id: remote_id.clone(),
             removed: false,
@@ -992,6 +983,71 @@ async fn us2_8_trash_then_restore_no_duplicate() {
         assert!(
             trashed.is_none(),
             "tombstone should be cleared after restore"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// a PERMANENT delete (removed=true, loss of access) removes the local file and
+// drops the row entirely — no tombstone, since there is nothing to restore (#8)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_9_permanent_delete_drops_row_without_tombstone() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let content = b"gone for good";
+    let remote_id = mock.insert_file(Some(&root_id), "doomed.txt", content);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("doomed.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(
+        &fx,
+        &mock,
+        &root_id,
+        &[SyncedItem {
+            relative_path: "doomed.txt",
+            remote_id: &remote_id,
+            content,
+        }],
+    );
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Permanent delete / loss of access: file gone, change carries removed=true.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.remove(&remote_id);
+        st.change_log.push(common::ChangeEntry {
+            file_id: remote_id.clone(),
+            removed: true,
+        });
+    }
+    let gone = wait_until(T_REMOTE_TO_LOCAL, || async {
+        !fx.local_dir.join("doomed.txt").exists()
+    })
+    .await;
+    assert!(
+        gone,
+        "permanent delete should remove local file; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+
+    // No tombstone: the row is gone entirely (a permanent delete isn't restorable).
+    with_state_db(&fx, |conn| {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_item WHERE remote_id = ?1",
+                rusqlite::params![remote_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "permanent delete must drop the row, not tombstone it"
         );
     });
 }

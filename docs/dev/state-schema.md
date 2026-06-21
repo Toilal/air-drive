@@ -16,13 +16,14 @@ sibling `src/state/*.rs` files.
 - `MIGRATIONS` is a **forward-only** ladder: `MIGRATIONS[i]` moves the DB from
   version `i` to `i + 1`. Each migration carries only the schema additions of
   its version.
-- The current `LATEST_VERSION` is **3**.
+- The current `LATEST_VERSION` is **4**.
 
 | Version | Adds                                                                                  |
 | ------- | ------------------------------------------------------------------------------------- |
 | v1      | Core tables: `account`, `folder_mapping`, `sync_item`, `pending_operation`, `conflict_record`, `drive_change_cursor`. |
 | v2      | `state_meta` — single-row surfaceable daemon state (blocked + last-sync counters).    |
 | v3      | `folder_mapping.remote_folder_spec` — the original CLI `<remote-folder>` spec, kept so the daemon can re-resolve / recreate the remote root if it was trashed on Drive between runs. |
+| v4      | `sync_item.trashed_at` (nullable epoch) — tombstone marker: a file trashed on Drive keeps its row (and `remote_id`) so a restore re-links instead of duplicating (#8). A start-up GC reclaims tombstones older than 30 days. |
 
 To add a schema change: append a new `Vn_SCHEMA` constant, push it onto
 `MIGRATIONS`, and bump `LATEST_VERSION`. Never edit a shipped migration in place.
@@ -74,6 +75,7 @@ One row per known file or folder under the mapped subtree.
 | `local_inode`    | INTEGER | For rename detection (nullable).                                                 |
 | `last_synced_at` | INTEGER | Unix epoch.                                                                      |
 | `state`          | TEXT    | `synced` \| `pending_local` \| `pending_remote` \| `conflict` \| `skipped`.      |
+| `trashed_at`     | INTEGER | (v4) Tombstone marker, nullable. Non-null = the file was trashed on Drive and removed locally, but the row is kept for restore de-duplication (#8). |
 
 Unique index on `(mapping_id, relative_path)`.
 

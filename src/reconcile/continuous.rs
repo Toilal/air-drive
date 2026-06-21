@@ -205,12 +205,16 @@ pub async fn apply_remote(
     }
 
     if change.removed {
+        // Permanent delete / loss of access (NOT a trash). The file is gone for
+        // good, so remove the local copy and drop the row — no tombstone, since
+        // there's nothing to restore.
         if let Some(item) = items::get_by_remote_id(db.connection(), &change.file_id).await? {
+            let payload = json!({ "tombstone": false }).to_string();
             ops::enqueue(
                 db.connection(),
                 item.id,
                 Operation::DeleteLocal,
-                None,
+                Some(&payload),
                 unix_now(),
             )
             .await?;
@@ -221,6 +225,29 @@ pub async fn apply_remote(
     let Some(file) = change.file else {
         return Ok(());
     };
+
+    if file.trashed {
+        // A trash surfaces as a normal change with the file still present. Treat
+        // it as a removal of the local copy. For a file we keep the row as a
+        // tombstone so a later restore (an untrash → non-trashed change) re-links
+        // to it; a directory is dropped outright (it just re-creates on restore).
+        if let Some(item) = items::get_by_remote_id(db.connection(), &change.file_id).await? {
+            if item.trashed_at.is_none() {
+                let tombstone = matches!(item.kind, ItemKind::File);
+                let payload = json!({ "tombstone": tombstone }).to_string();
+                ops::enqueue(
+                    db.connection(),
+                    item.id,
+                    Operation::DeleteLocal,
+                    Some(&payload),
+                    unix_now(),
+                )
+                .await?;
+            }
+            // else: already tombstoned — echo of our own trash handling.
+        }
+        return Ok(());
+    }
 
     if file.is_folder() {
         let rel = change

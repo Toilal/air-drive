@@ -29,13 +29,15 @@ use crate::state::mapping::MappingId;
 use crate::state::unix_now;
 
 /// One Drive change that reached the daemon — emitted by the poller, consumed
-/// by `reconcile_remote`. `removed = true` means the file was trashed; `file`
-/// is `None` in that case.
+/// by `reconcile_remote`. `removed = true` means the file was **permanently
+/// deleted or access was lost** (`file` is `None`). A *trash* is NOT a removal:
+/// it surfaces as a normal change with `file` present and `file.trashed = true`.
 #[derive(Debug, Clone)]
 pub struct RemoteChange {
     /// Drive file ID the change refers to.
     pub file_id: String,
-    /// `true` for delete / trash events.
+    /// `true` for permanent delete / loss of access (NOT a trash — see
+    /// [`FileSnapshot::trashed`]).
     pub removed: bool,
     /// Full file resource for non-removal events (id, name, mime, size, md5, parents).
     pub file: Option<FileSnapshot>,
@@ -64,6 +66,11 @@ pub struct FileSnapshot {
     pub md5: Option<String>,
     /// Parent folder IDs (may be empty after a parent-detach).
     pub parents: Vec<String>,
+    /// `true` when the file is in Drive's trash. A *trash* surfaces as a normal
+    /// change (`removed = false`) with the file still present — distinct from a
+    /// permanent delete / loss of access, which surfaces as `removed = true` with
+    /// no file. The reconciler treats a trash as a removal of the local copy.
+    pub trashed: bool,
 }
 
 impl FileSnapshot {
@@ -112,7 +119,7 @@ pub async fn run(
                     ("pageToken", token.as_str()),
                     (
                         "fields",
-                        "newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,md5Checksum,parents))",
+                        "newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,md5Checksum,parents,trashed))",
                     ),
                 ],
             )
@@ -345,6 +352,7 @@ fn parse_snapshot(v: &serde_json::Value) -> Option<FileSnapshot> {
                 .collect()
         })
         .unwrap_or_default();
+    let trashed = v.get("trashed").and_then(|x| x.as_bool()).unwrap_or(false);
     Some(FileSnapshot {
         id,
         name,
@@ -352,6 +360,7 @@ fn parse_snapshot(v: &serde_json::Value) -> Option<FileSnapshot> {
         size,
         md5,
         parents,
+        trashed,
     })
 }
 
@@ -398,6 +407,7 @@ mod tests {
             size: None,
             md5: None,
             parents: vec![],
+            trashed: false,
         };
         assert!(folder.is_folder());
     }

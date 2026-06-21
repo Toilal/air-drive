@@ -340,17 +340,19 @@ async fn execute(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(Error::Io(e)),
             }
-            match item.kind {
-                // Keep a file row as a tombstone (its remote_id preserved) so a
-                // later restore from Drive's trash re-links to it and re-downloads
-                // to the original path, rather than creating a duplicate (#8).
-                items::ItemKind::File => {
-                    items::mark_trashed(db.connection(), item.id, unix_now()).await?;
-                }
-                // Directories aren't tombstoned: a restored folder just re-creates.
-                items::ItemKind::Dir => {
-                    items::delete(db.connection(), item.id).await?;
-                }
+            // `tombstone` is set by the reconciler: true for a trash (keep the
+            // file row + remote_id so a restore re-links and re-downloads to the
+            // original path, avoiding a duplicate — #8), false for a permanent
+            // delete / loss of access (drop the row). Directories are never
+            // tombstoned regardless.
+            let tombstone = parse_payload(&op.payload)
+                .get("tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if tombstone && matches!(item.kind, items::ItemKind::File) {
+                items::mark_trashed(db.connection(), item.id, unix_now()).await?;
+            } else {
+                items::delete(db.connection(), item.id).await?;
             }
         }
 
