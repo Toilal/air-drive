@@ -394,12 +394,51 @@ async fn execute(
             // the round-trip saves the poller a redundant `apply_remote` walk.
             let _guard = in_flight.mark(rid);
             engine.move_remote(rid, &new_parent_id, new_name).await?;
-            items::set_relative_path(db.connection(), item.id, new_rel).await?;
+            match item.kind {
+                // Moving a folder on Drive relocates its whole subtree (the
+                // children keep it as parent), so only the folder needs the API
+                // call — but every descendant's relative_path must be rewritten.
+                items::ItemKind::Dir => {
+                    items::rename_subtree(
+                        db.connection(),
+                        item.mapping_id,
+                        &item.relative_path,
+                        new_rel,
+                    )
+                    .await?;
+                }
+                items::ItemKind::File => {
+                    items::set_relative_path(db.connection(), item.id, new_rel).await?;
+                }
+            }
         }
 
-        // The remaining variants (RenameLocal / MarkConflict) are not produced
-        // by the current reconciler. We log + drop the op so a stale row from an
-        // earlier version doesn't wedge the queue.
+        Operation::RenameLocal => {
+            let payload = parse_payload(&op.payload);
+            let new_rel = payload
+                .get("new_relative_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::Mapping("RenameLocal op missing new_relative_path".into()))?;
+            let old_rel = item.relative_path.clone();
+            let old_local = local_root.join(&old_rel);
+            let new_local = local_root.join(new_rel);
+            if let Some(parent) = new_local.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(Error::Io)?;
+            }
+            // Rename the local directory — moves the whole subtree on disk at once.
+            match tokio::fs::rename(&old_local, &new_local).await {
+                Ok(()) => {}
+                // Already moved (e.g. a retry, or the user did it too) — fall through
+                // to the DB rewrite so state still converges.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::Io(e)),
+            }
+            items::rename_subtree(db.connection(), item.mapping_id, &old_rel, new_rel).await?;
+        }
+
+        // The remaining variant (MarkConflict) is not produced by the current
+        // reconciler. We log + drop the op so a stale row from an earlier version
+        // doesn't wedge the queue.
         other => {
             tracing::warn!(?other, op_id = op.id.0, "no dispatcher path for op");
         }

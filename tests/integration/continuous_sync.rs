@@ -16,7 +16,7 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{DaemonProcess, DriveMock, FsFixture, fs_fixture, wait_until};
+use common::{DaemonProcess, DriveMock, FsFixture, fs_fixture, wait_until, with_state_db};
 
 const T_LOCAL_TO_REMOTE: Duration = Duration::from_secs(15);
 const T_REMOTE_TO_LOCAL: Duration = Duration::from_secs(60);
@@ -707,6 +707,191 @@ async fn us2_6_remote_nonempty_dir_delete_removes_subtree_locally() {
 }
 
 // ---------------------------------------------------------------------------
+// renaming a folder locally moves it on Drive (no re-upload) and rewrites the
+// descendant paths in the DB (folder rename/move, #7)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_7_local_dir_rename_propagates_without_reupload() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let docs_id = mock.insert_folder(Some(&root_id), "docs");
+    let content = b"spec payload";
+    let spec_id = mock.insert_file(Some(&docs_id), "spec.txt", content);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("docs/spec.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state_with_dirs(
+        &fx,
+        &mock,
+        &root_id,
+        &[("docs", docs_id.as_str())],
+        &[SyncedItem {
+            relative_path: "docs/spec.txt",
+            remote_id: &spec_id,
+            content,
+        }],
+    );
+
+    let uploads_before = mock.upload_count().await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Rename the directory locally — filesystems emit a single rename event on the
+    // folder, none on its descendants.
+    std::fs::rename(fx.local_dir.join("docs"), fx.local_dir.join("documents")).unwrap();
+
+    let renamed = wait_until(T_LOCAL_TO_REMOTE, || async {
+        let st = mock.state.lock().unwrap();
+        st.files
+            .get(&docs_id)
+            .map(|f| f.name == "documents")
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        renamed,
+        "folder rename should reach Drive within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    {
+        let st = mock.state.lock().unwrap();
+        // The child kept its id and its parent (the folder), i.e. it moved with the
+        // folder rather than being re-created.
+        let spec = st
+            .files
+            .get(&spec_id)
+            .expect("spec.txt still exists on Drive");
+        assert_eq!(spec.parent_id.as_deref(), Some(docs_id.as_str()));
+    }
+    // No re-upload: the rename is a metadata move, not a files.create.
+    assert_eq!(
+        mock.upload_count().await,
+        uploads_before,
+        "folder rename MUST NOT re-upload the child file"
+    );
+    daemon.shutdown().await;
+
+    // Descendant paths were rewritten under the new prefix.
+    with_state_db(&fx, |conn| {
+        let dir_kind: String = conn
+            .query_row(
+                "SELECT kind FROM sync_item WHERE relative_path = 'documents'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("renamed dir row 'documents' should exist");
+        assert_eq!(dir_kind, "dir");
+        let child_remote: Option<String> = conn
+            .query_row(
+                "SELECT remote_id FROM sync_item WHERE relative_path = 'documents/spec.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("descendant row should be rewritten to documents/spec.txt");
+        assert_eq!(
+            child_remote.as_deref(),
+            Some(spec_id.as_str()),
+            "descendant kept its remote_id (no re-upload)"
+        );
+        let old_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_item WHERE relative_path = 'docs' \
+                 OR relative_path LIKE 'docs/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_count, 0,
+            "no rows should remain under the old 'docs' prefix"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// renaming a folder on Drive renames it locally and rewrites descendant paths
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_7_remote_dir_rename_propagates_locally() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let docs_id = mock.insert_folder(Some(&root_id), "docs");
+    let content = b"spec payload";
+    let spec_id = mock.insert_file(Some(&docs_id), "spec.txt", content);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("docs/spec.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state_with_dirs(
+        &fx,
+        &mock,
+        &root_id,
+        &[("docs", docs_id.as_str())],
+        &[SyncedItem {
+            relative_path: "docs/spec.txt",
+            remote_id: &spec_id,
+            content,
+        }],
+    );
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Rename the folder on Drive (web-UI style): change its name + log the change.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.get_mut(&docs_id).unwrap().name = "documents".to_string();
+        st.change_log.push(common::ChangeEntry {
+            file_id: docs_id.clone(),
+            removed: false,
+        });
+    }
+
+    let renamed = wait_until(T_REMOTE_TO_LOCAL, || async {
+        fx.local_dir.join("documents/spec.txt").is_file() && !fx.local_dir.join("docs").exists()
+    })
+    .await;
+    assert!(
+        renamed,
+        "folder rename should land locally within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+
+    // Child kept its content, and the DB rows were rewritten under the new prefix.
+    assert_eq!(
+        std::fs::read(fx.local_dir.join("documents/spec.txt")).unwrap(),
+        content
+    );
+    with_state_db(&fx, |conn| {
+        let child_remote: Option<String> = conn
+            .query_row(
+                "SELECT remote_id FROM sync_item WHERE relative_path = 'documents/spec.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("descendant row rewritten to documents/spec.txt");
+        assert_eq!(child_remote.as_deref(), Some(spec_id.as_str()));
+        let old_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_item WHERE relative_path = 'docs' \
+                 OR relative_path LIKE 'docs/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_count, 0,
+            "no rows should remain under the old 'docs' prefix"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Seeding helpers — applied via sync rusqlite using the production schema.
 // ---------------------------------------------------------------------------
 
@@ -728,7 +913,7 @@ fn seed_synced_state_with_dirs(
     fx: &FsFixture,
     _mock: &DriveMock,
     root_id: &str,
-    _known_dirs: &[(&str, &str)],
+    known_dirs: &[(&str, &str)],
     items: &[SyncedItem<'_>],
 ) {
     let path = fx.state_db_path();
@@ -789,10 +974,17 @@ fn seed_synced_state_with_dirs(
         .unwrap();
     }
 
-    // `known_dirs` is accepted today to keep the test surface stable; the daemon
-    // discovers subfolder IDs at runtime via its own walk + cache (see
-    // `reconcile::ensure_remote_folder`), so we don't need to seed them here. The
-    // unused-binding helper below silences the warning without making the helper
-    // signature less convenient to call from tests.
-    let _ = (_known_dirs, fx.local_dir.as_path() as &Path);
+    // Seed known subdirectories as persisted kind='dir' rows with their Drive id,
+    // mirroring what the daemon records for folders (needed to anchor a folder
+    // rename/move — issue #7).
+    for (rel, remote_id) in known_dirs {
+        conn.execute(
+            "INSERT INTO sync_item (mapping_id, relative_path, kind, remote_id, size, md5, \
+                                    local_inode, last_synced_at, state) \
+             VALUES (1, ?1, 'dir', ?2, NULL, NULL, NULL, 0, 'synced')",
+            rusqlite::params![rel, remote_id],
+        )
+        .unwrap();
+    }
+    let _ = fx.local_dir.as_path() as &Path;
 }

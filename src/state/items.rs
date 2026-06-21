@@ -284,6 +284,58 @@ pub async fn set_relative_path(conn: &Connection, id: ItemId, new_path: &str) ->
     .map_err(Into::into)
 }
 
+/// Rewrite the `relative_path` of a directory **and all its descendants** in a
+/// single transaction, replacing the leading `old_prefix` with `new_prefix`.
+///
+/// Used when a folder is renamed or moved: the filesystem `mv` (or Drive move)
+/// relocates the whole subtree at once and emits no per-descendant events, so the
+/// daemon rewrites the rows itself. Each item keeps its `remote_id` — no re-upload.
+pub async fn rename_subtree(
+    conn: &Connection,
+    mapping_id: MappingId,
+    old_prefix: &str,
+    new_prefix: &str,
+) -> Result<()> {
+    let old = old_prefix.to_owned();
+    let new = new_prefix.to_owned();
+    conn.call(move |c| {
+        let tx = c.transaction()?;
+        // Collect the directory row plus every descendant (`old/...`). The LIKE
+        // uses an explicit ESCAPE so `%` / `_` in names are matched literally.
+        let like = format!("{}/%", escape_like(&old));
+        let affected: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, relative_path FROM sync_item \
+                 WHERE mapping_id = ?1 AND (relative_path = ?2 OR relative_path LIKE ?3 ESCAPE '\\')",
+            )?;
+            let rows = stmt.query_map(params![mapping_id.0, old, like], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (id, path) in affected {
+            // `path` is either exactly `old` or starts with `old/`; splitting at
+            // `old.len()` is a valid char boundary since `old` is a prefix.
+            let new_path = format!("{}{}", new, &path[old.len()..]);
+            tx.execute(
+                "UPDATE sync_item SET relative_path = ?1 WHERE id = ?2",
+                params![new_path, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// Escape `%`, `_` and `\` for use inside a SQL `LIKE` pattern with `ESCAPE '\'`.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Update the (size, md5) fingerprint and `last_synced_at` for an item.
 pub async fn update_fingerprint(
     conn: &Connection,
@@ -421,6 +473,85 @@ mod tests {
         assert_eq!(item.relative_path, "a/b.txt");
         assert_eq!(item.size, Some(123));
         assert_eq!(item.state, ItemState::Synced);
+    }
+
+    #[tokio::test]
+    async fn rename_subtree_rewrites_dir_and_all_descendants() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let conn = db.connection();
+        // A non-trivial subtree under `docs`, plus a sibling that must NOT move.
+        for p in [
+            "docs",
+            "docs/sub",
+            "docs/spec.txt",
+            "docs/sub/deep.txt",
+            "other.txt",
+        ] {
+            insert(conn, &sample(mapping_id, p)).await.unwrap();
+        }
+
+        rename_subtree(conn, mapping_id, "docs", "documents")
+            .await
+            .unwrap();
+
+        // The whole `docs/...` subtree is rewritten under `documents/...`.
+        for p in ["docs", "docs/sub", "docs/spec.txt", "docs/sub/deep.txt"] {
+            assert!(
+                get_by_relative_path(conn, mapping_id, p)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{p} should no longer exist"
+            );
+        }
+        for p in [
+            "documents",
+            "documents/sub",
+            "documents/spec.txt",
+            "documents/sub/deep.txt",
+        ] {
+            let it = get_by_relative_path(conn, mapping_id, p)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{p} should exist after rename"));
+            // remote_id preserved → no re-upload.
+            assert_eq!(it.remote_id.as_deref(), Some("r1"));
+        }
+        // The sibling outside the subtree is untouched.
+        assert!(
+            get_by_relative_path(conn, mapping_id, "other.txt")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_subtree_does_not_touch_lookalike_prefix() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let conn = db.connection();
+        // `docs2` shares the `docs` text prefix but is NOT a descendant of `docs`.
+        for p in ["docs", "docs/a.txt", "docs2", "docs2/b.txt"] {
+            insert(conn, &sample(mapping_id, p)).await.unwrap();
+        }
+
+        rename_subtree(conn, mapping_id, "docs", "documents")
+            .await
+            .unwrap();
+
+        assert!(
+            get_by_relative_path(conn, mapping_id, "documents/a.txt")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // `docs2` and its child must be left alone (prefix is `docs/`, not `docs`).
+        assert!(
+            get_by_relative_path(conn, mapping_id, "docs2/b.txt")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

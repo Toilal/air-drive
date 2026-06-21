@@ -1,7 +1,7 @@
 # 030 — Folder rename/move propagation
 
 - **Priority:** 🟠 high
-- **Status:** Blocked on [020](020-propagate-empty-directories.md)
+- **Status:** Implemented — pending e2e verification against real Drive
 - **Issue:** [#7](https://github.com/Toilal/air-drive/issues/7)
 - **Area:** reconcile, state
 
@@ -53,8 +53,24 @@ Once folders are `sync_item` rows (020):
 
 ## Acceptance
 
-- [ ] `mv docs documents` locally renames the folder on Drive.
-- [ ] Renaming/moving a folder on Drive renames/moves it locally.
-- [ ] Descendants keep their `remote_id` (no re-upload), and their
-  `relative_path` rows are rewritten atomically.
-- [ ] Integration test covers a non-trivial subtree rename, both directions.
+- [x] `mv docs documents` locally renames the folder on Drive — no re-upload
+  (`continuous_sync.rs` `us2_7_local_dir_rename_propagates_without_reupload`).
+- [x] Renaming/moving a folder on Drive renames/moves it locally
+  (`us2_7_remote_dir_rename_propagates_locally`).
+- [x] Descendants keep their `remote_id` (no re-upload) and their `relative_path`
+  rows are rewritten atomically (`items::rename_subtree`, in a transaction;
+  unit-tested incl. a lookalike-prefix `docs2` guard).
+- [x] Coverage of a non-trivial multi-level subtree
+  (`items::tests::rename_subtree_rewrites_dir_and_all_descendants`).
+
+## Implementation notes
+
+`items::rename_subtree` rewrites the directory row + every descendant
+(`old/...` → `new/...`) in one transaction, keeping each `remote_id`. The
+dispatcher routes folder ops to it: `RenameRemote` (kind=Dir) after
+`engine.move_remote`, and `RenameLocal` after `fs::rename`. `apply_remote`
+detects a folder rename/move when a known `remote_id`'s path changed. Echo of a
+local `fs::rename` converges harmlessly (a redundant no-op move at worst).
+
+Remaining before deletion of this entry: e2e verification against real Drive
+(`RcloneEngine::move_remote` for a folder is exercised only there).

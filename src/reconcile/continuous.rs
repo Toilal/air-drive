@@ -216,40 +216,52 @@ pub async fn apply_remote(
     };
 
     if file.is_folder() {
-        // Persist the folder as kind='dir' and enqueue a local mkdir. If we
-        // already know it by remote_id, this is the echo of a folder we created
-        // ourselves — skip it.
-        if items::get_by_remote_id(db.connection(), &change.file_id)
-            .await?
-            .is_none()
-        {
-            let rel = change
-                .relative_path
-                .clone()
-                .unwrap_or_else(|| file.name.clone());
-            let new_id = items::insert(
-                db.connection(),
-                &NewSyncItem {
-                    mapping_id,
-                    relative_path: rel,
-                    kind: ItemKind::Dir,
-                    remote_id: Some(file.id.clone()),
-                    size: None,
-                    md5: None,
-                    local_inode: None,
-                    last_synced_at: 0,
-                    state: ItemState::PendingLocal,
-                },
-            )
-            .await?;
-            ops::enqueue(
-                db.connection(),
-                new_id,
-                Operation::CreateDirLocal,
-                None,
-                unix_now(),
-            )
-            .await?;
+        let rel = change
+            .relative_path
+            .clone()
+            .unwrap_or_else(|| file.name.clone());
+        match items::get_by_remote_id(db.connection(), &change.file_id).await? {
+            None => {
+                // Brand-new folder → persist as kind='dir' and enqueue a local mkdir.
+                let new_id = items::insert(
+                    db.connection(),
+                    &NewSyncItem {
+                        mapping_id,
+                        relative_path: rel,
+                        kind: ItemKind::Dir,
+                        remote_id: Some(file.id.clone()),
+                        size: None,
+                        md5: None,
+                        local_inode: None,
+                        last_synced_at: 0,
+                        state: ItemState::PendingLocal,
+                    },
+                )
+                .await?;
+                ops::enqueue(
+                    db.connection(),
+                    new_id,
+                    Operation::CreateDirLocal,
+                    None,
+                    unix_now(),
+                )
+                .await?;
+            }
+            Some(existing) if existing.relative_path != rel => {
+                // Known folder whose path changed on Drive → renamed or moved.
+                // Propagate locally; the descendants follow on disk and are
+                // rewritten in the DB by the dispatcher (no per-child events).
+                let payload = json!({ "new_relative_path": rel }).to_string();
+                ops::enqueue(
+                    db.connection(),
+                    existing.id,
+                    Operation::RenameLocal,
+                    Some(&payload),
+                    unix_now(),
+                )
+                .await?;
+            }
+            Some(_) => { /* same path — echo of a folder we created; nothing to do */ }
         }
         return Ok(());
     }
