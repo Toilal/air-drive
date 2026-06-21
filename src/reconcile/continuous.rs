@@ -131,6 +131,13 @@ pub async fn apply_local(
             if let Some(item) =
                 items::get_by_relative_path(db.connection(), mapping_id, &rel).await?
             {
+                if item.trashed_at.is_some() {
+                    // The row is a tombstone: this Deleted event is the echo of our
+                    // own local removal after a remote trash. Keep the tombstone
+                    // (it anchors a future restore) and do NOT propagate a delete
+                    // back to Drive — that would be a feedback loop (#8).
+                    return Ok(());
+                }
                 if item.remote_id.is_some() {
                     ops::enqueue(
                         db.connection(),
@@ -281,6 +288,30 @@ pub async fn apply_remote(
 
     match items::get_by_remote_id(db.connection(), &change.file_id).await? {
         Some(item) => {
+            // Restore: the row is a tombstone (file was trashed on Drive, local
+            // copy removed) and the file is back. Clear the tombstone and
+            // re-download to the ORIGINAL path — re-using this row, so no
+            // duplicate is created (#8). Checked before echo suppression because
+            // a restore usually carries the same md5 the row still remembers.
+            if item.trashed_at.is_some() {
+                items::clear_trashed(db.connection(), item.id).await?;
+                let payload = json!({
+                    "remote_id": file.id,
+                    "size": remote_size,
+                    "md5": remote_md5,
+                    "relative_path": item.relative_path,
+                })
+                .to_string();
+                ops::enqueue(
+                    db.connection(),
+                    item.id,
+                    Operation::Download,
+                    Some(&payload),
+                    unix_now(),
+                )
+                .await?;
+                return Ok(());
+            }
             // Echo suppression: same md5 means this is a notification of our
             // own upload — nothing to do.
             if item.md5.as_deref() == Some(remote_md5.as_str()) && item.size == Some(remote_size) {

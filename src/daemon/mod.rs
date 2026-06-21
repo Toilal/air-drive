@@ -54,11 +54,24 @@ pub struct DaemonContext {
     pub watch_ignore_patterns: Vec<String>,
 }
 
+/// How long a tombstone — a trashed file's row kept so a restore re-links instead
+/// of duplicating (#8) — is retained before the start-up GC reclaims it (30 days).
+const TOMBSTONE_RETENTION_SECS: i64 = 30 * 24 * 3600;
+
 /// Run the daemon's continuous sync loop until `cancel` fires (SIGTERM/SIGINT or
 /// an external trigger). Returns once every spawned task has drained.
 pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     // Pre-flight: clear any stale partial downloads from a previous crash.
     staging::cleanup_orphans(&ctx.local_root)?;
+
+    // Pre-flight: reclaim tombstones older than the retention window so the
+    // sync_item table doesn't grow unbounded with long-trashed files (#8).
+    let cutoff = crate::state::unix_now() - TOMBSTONE_RETENTION_SECS;
+    match crate::state::items::gc_tombstones(ctx.db.connection(), cutoff).await {
+        Ok(n) if n > 0 => tracing::info!(reclaimed = n, "garbage-collected expired tombstones"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "tombstone GC failed; continuing"),
+    }
 
     // Notifier the reconciler signals on every enqueue so the dispatcher
     // wakes immediately instead of waiting POLL_INTERVAL.

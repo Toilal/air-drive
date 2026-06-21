@@ -112,6 +112,11 @@ pub struct SyncItem {
     pub last_synced_at: i64,
     /// Lifecycle state.
     pub state: ItemState,
+    /// When `Some`, the item is a **tombstone**: the file was trashed on Drive and
+    /// its local copy removed, but the row is kept (with its `remote_id`) so a later
+    /// restore re-links to the original path instead of creating a duplicate. The
+    /// value is the Unix epoch second of the trash, used by the retention GC.
+    pub trashed_at: Option<i64>,
 }
 
 /// Owned struct without an id, used when inserting new rows.
@@ -174,7 +179,7 @@ pub async fn get_by_relative_path(
     conn.call(move |c| {
         let res = c.query_row(
             "SELECT id, mapping_id, relative_path, kind, remote_id, size, md5, local_inode,
-                    last_synced_at, state
+                    last_synced_at, state, trashed_at
              FROM sync_item WHERE mapping_id = ?1 AND relative_path = ?2",
             params![mapping_id.0, relative_path],
             row_to_item,
@@ -194,23 +199,10 @@ pub async fn get_by_id(conn: &Connection, id: ItemId) -> Result<Option<SyncItem>
     conn.call(move |c| {
         let res = c.query_row(
             "SELECT id, mapping_id, relative_path, kind, remote_id, size, md5, \
-                    local_inode, last_synced_at, state \
+                    local_inode, last_synced_at, state, trashed_at \
              FROM sync_item WHERE id = ?1",
             params![id.0],
-            |row| {
-                Ok(SyncItem {
-                    id: ItemId(row.get(0)?),
-                    mapping_id: MappingId(row.get(1)?),
-                    relative_path: row.get(2)?,
-                    kind: ItemKind::from_sql(&row.get::<_, String>(3)?, 3)?,
-                    remote_id: row.get(4)?,
-                    size: row.get(5)?,
-                    md5: row.get(6)?,
-                    local_inode: row.get(7)?,
-                    last_synced_at: row.get(8)?,
-                    state: ItemState::from_sql(&row.get::<_, String>(9)?, 9)?,
-                })
-            },
+            row_to_item,
         );
         match res {
             Ok(i) => Ok(Some(i)),
@@ -228,23 +220,10 @@ pub async fn get_by_remote_id(conn: &Connection, remote_id: &str) -> Result<Opti
     conn.call(move |c| {
         let res = c.query_row(
             "SELECT id, mapping_id, relative_path, kind, remote_id, size, md5, \
-                    local_inode, last_synced_at, state \
+                    local_inode, last_synced_at, state, trashed_at \
              FROM sync_item WHERE remote_id = ?1",
             params![remote_id],
-            |row| {
-                Ok(SyncItem {
-                    id: ItemId(row.get(0)?),
-                    mapping_id: MappingId(row.get(1)?),
-                    relative_path: row.get(2)?,
-                    kind: ItemKind::from_sql(&row.get::<_, String>(3)?, 3)?,
-                    remote_id: row.get(4)?,
-                    size: row.get(5)?,
-                    md5: row.get(6)?,
-                    local_inode: row.get(7)?,
-                    last_synced_at: row.get(8)?,
-                    state: ItemState::from_sql(&row.get::<_, String>(9)?, 9)?,
-                })
-            },
+            row_to_item,
         );
         match res {
             Ok(i) => Ok(Some(i)),
@@ -381,13 +360,57 @@ pub async fn delete(conn: &Connection, id: ItemId) -> Result<()> {
     .map_err(Into::into)
 }
 
+/// Mark an item as a tombstone: its local copy was removed because the file was
+/// trashed on Drive, but the row (and its `remote_id`) is kept so a later restore
+/// re-links to the original path. `trashed_at` is the Unix epoch second of the
+/// trash, consumed by [`gc_tombstones`].
+pub async fn mark_trashed(conn: &Connection, id: ItemId, trashed_at: i64) -> Result<()> {
+    conn.call(move |c| {
+        c.execute(
+            "UPDATE sync_item SET trashed_at = ?1 WHERE id = ?2",
+            params![trashed_at, id.0],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// Clear an item's tombstone (a trashed file was restored on Drive).
+pub async fn clear_trashed(conn: &Connection, id: ItemId) -> Result<()> {
+    conn.call(move |c| {
+        c.execute(
+            "UPDATE sync_item SET trashed_at = NULL WHERE id = ?1",
+            params![id.0],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// Permanently delete tombstones trashed strictly before `cutoff` (a Unix epoch
+/// second). Returns the number of rows reclaimed. Live items (`trashed_at IS NULL`)
+/// are never touched.
+pub async fn gc_tombstones(conn: &Connection, cutoff: i64) -> Result<usize> {
+    conn.call(move |c| {
+        let n = c.execute(
+            "DELETE FROM sync_item WHERE trashed_at IS NOT NULL AND trashed_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(n)
+    })
+    .await
+    .map_err(Into::into)
+}
+
 /// Materialise every item belonging to a mapping. Allocates a `Vec`; this is fine for
 /// the MVP's scale ceiling of ≤ 50 000 items.
 pub async fn list_for_mapping(conn: &Connection, mapping_id: MappingId) -> Result<Vec<SyncItem>> {
     conn.call(move |c| {
         let mut stmt = c.prepare(
             "SELECT id, mapping_id, relative_path, kind, remote_id, size, md5, local_inode,
-                    last_synced_at, state
+                    last_synced_at, state, trashed_at
              FROM sync_item WHERE mapping_id = ?1
              ORDER BY relative_path",
         )?;
@@ -416,6 +439,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncItem> {
         local_inode: row.get(7)?,
         last_synced_at: row.get(8)?,
         state: ItemState::from_sql(&state_s, 9)?,
+        trashed_at: row.get(10)?,
     })
 }
 
@@ -524,6 +548,56 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn mark_then_clear_trashed_roundtrip() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let conn = db.connection();
+        let id = insert(conn, &sample(mapping_id, "f.txt")).await.unwrap();
+        assert!(
+            get_by_id(conn, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .trashed_at
+                .is_none()
+        );
+        mark_trashed(conn, id, 1234).await.unwrap();
+        assert_eq!(
+            get_by_id(conn, id).await.unwrap().unwrap().trashed_at,
+            Some(1234)
+        );
+        clear_trashed(conn, id).await.unwrap();
+        assert!(
+            get_by_id(conn, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .trashed_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_tombstones_reclaims_only_old_ones() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let conn = db.connection();
+        let live = insert(conn, &sample(mapping_id, "live.txt")).await.unwrap();
+        let old = insert(conn, &sample(mapping_id, "old.txt")).await.unwrap();
+        let recent = insert(conn, &sample(mapping_id, "recent.txt"))
+            .await
+            .unwrap();
+        mark_trashed(conn, old, 1000).await.unwrap();
+        mark_trashed(conn, recent, 5000).await.unwrap();
+
+        // cutoff 3000: reclaims the old tombstone (1000), keeps the recent (5000)
+        // and never touches the live row.
+        let reclaimed = gc_tombstones(conn, 3000).await.unwrap();
+        assert_eq!(reclaimed, 1);
+        assert!(get_by_id(conn, live).await.unwrap().is_some());
+        assert!(get_by_id(conn, old).await.unwrap().is_none());
+        assert!(get_by_id(conn, recent).await.unwrap().is_some());
     }
 
     #[tokio::test]

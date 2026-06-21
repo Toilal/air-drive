@@ -340,7 +340,18 @@ async fn execute(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(Error::Io(e)),
             }
-            items::delete(db.connection(), item.id).await?;
+            match item.kind {
+                // Keep a file row as a tombstone (its remote_id preserved) so a
+                // later restore from Drive's trash re-links to it and re-downloads
+                // to the original path, rather than creating a duplicate (#8).
+                items::ItemKind::File => {
+                    items::mark_trashed(db.connection(), item.id, unix_now()).await?;
+                }
+                // Directories aren't tombstoned: a restored folder just re-creates.
+                items::ItemKind::Dir => {
+                    items::delete(db.connection(), item.id).await?;
+                }
+            }
         }
 
         Operation::CreateDirRemote => {

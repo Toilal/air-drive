@@ -13,7 +13,7 @@
 //! `specs/001-minimal-sync-daemon/data-model.md`.
 
 /// Latest schema version this binary knows how to apply.
-pub const LATEST_VERSION: i64 = 3;
+pub const LATEST_VERSION: i64 = 4;
 
 /// Unconditional bootstrap: ensures `schema_version` exists so the migration runner can
 /// always read it. Idempotent.
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 /// Forward-only migrations. Index `i` is the SQL block to apply when moving from schema
 /// version `i` to `i+1`. The bootstrap step above already created `schema_version` so
 /// migrations only carry the **schema additions** of their version.
-pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA, V3_SCHEMA];
+pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA];
 
 const V1_SCHEMA: &str = r#"
 -- linked Google Drive account (single row in MVP, id=1)
@@ -118,6 +118,14 @@ CREATE TABLE state_meta (
     items_downloaded INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO state_meta (id) VALUES (1);
+"#;
+
+/// v4 — tombstone support: `sync_item.trashed_at` (Unix epoch seconds, nullable).
+/// A non-null value marks a row whose file was trashed on Drive and removed
+/// locally, kept (with its `remote_id`) so a restore re-links to the original path
+/// instead of duplicating. A retention GC reclaims old tombstones (issue #8).
+const V4_SCHEMA: &str = r#"
+ALTER TABLE sync_item ADD COLUMN trashed_at INTEGER;
 "#;
 
 /// v3 — persist the original `<remote-folder>` CLI spec on the mapping row.

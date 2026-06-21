@@ -892,6 +892,111 @@ async fn us2_7_remote_dir_rename_propagates_locally() {
 }
 
 // ---------------------------------------------------------------------------
+// trashing a file then restoring it from Drive's trash re-links to the same row
+// (no duplicate sync_item) and brings the file back at its original path (#8)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_8_trash_then_restore_no_duplicate() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let content = b"restore me";
+    let remote_id = mock.insert_file(Some(&root_id), "doc.txt", content);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("doc.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(
+        &fx,
+        &mock,
+        &root_id,
+        &[SyncedItem {
+            relative_path: "doc.txt",
+            remote_id: &remote_id,
+            content,
+        }],
+    );
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Trash on Drive — the local copy is removed but the row survives as a tombstone.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.remove(&remote_id);
+        st.change_log.push(common::ChangeEntry {
+            file_id: remote_id.clone(),
+            removed: true,
+        });
+    }
+    let gone = wait_until(T_REMOTE_TO_LOCAL, || async {
+        !fx.local_dir.join("doc.txt").exists()
+    })
+    .await;
+    assert!(
+        gone,
+        "trash should remove local doc.txt; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Restore on Drive: same id + same content reappear.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.insert(
+            remote_id.clone(),
+            common::DriveFile {
+                id: remote_id.clone(),
+                parent_id: Some(root_id.clone()),
+                name: "doc.txt".into(),
+                mime_type: "text/plain".into(),
+                content: content.to_vec(),
+                md5: common::hex_md5(content),
+            },
+        );
+        st.change_log.push(common::ChangeEntry {
+            file_id: remote_id.clone(),
+            removed: false,
+        });
+    }
+    let restored = wait_until(T_REMOTE_TO_LOCAL, || async {
+        std::fs::read(fx.local_dir.join("doc.txt"))
+            .map(|b| b == content)
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        restored,
+        "restore should bring doc.txt back; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+
+    // Exactly one row for this Drive id, at the original path, tombstone cleared.
+    with_state_db(&fx, |conn| {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_item WHERE remote_id = ?1",
+                rusqlite::params![remote_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "restore must not duplicate the sync_item row");
+        let (path, trashed): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT relative_path, trashed_at FROM sync_item WHERE remote_id = ?1",
+                rusqlite::params![remote_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(path, "doc.txt");
+        assert!(
+            trashed.is_none(),
+            "tombstone should be cleared after restore"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Seeding helpers — applied via sync rusqlite using the production schema.
 // ---------------------------------------------------------------------------
 
