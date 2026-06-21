@@ -17,15 +17,6 @@ the current status.
 
 ## Order
 
-### Correctness — fix first
-
-| #   | Feature                                                              | Priority    | Issue |
-| --- | ------------------------------------------------------------------- | ----------- | ----- |
-| 010 | [rclone access-token refresh](010-rclone-token-refresh.md)          | 🔴 critical | [#5](https://github.com/Toilal/air-drive/issues/5) |
-| 020 | [Propagate empty directories (folders as items)](020-propagate-empty-directories.md) | 🟠 high | [#1](https://github.com/Toilal/air-drive/issues/1) |
-| 030 | [Folder rename/move propagation](030-folder-rename-move-propagation.md) | 🟠 high  | [#7](https://github.com/Toilal/air-drive/issues/7) |
-| 040 | [Trashed-file restore duplicate](040-trashed-file-restore-duplicate.md) | 🟡 medium | [#8](https://github.com/Toilal/air-drive/issues/8) |
-
 ### Near-term — complete single-account sync
 
 | #   | Feature                                                       | Priority  | Issue |
