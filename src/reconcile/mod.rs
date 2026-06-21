@@ -17,6 +17,7 @@
 pub mod conflict;
 pub mod continuous;
 pub mod fingerprint;
+pub mod shortcut;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -54,6 +55,9 @@ struct RemoteEntry {
     size: i64,
     /// Drive `md5Checksum`; `None` for folders and for native Google Docs.
     md5: Option<String>,
+    /// Drive MIME type. Used to tell native Google Docs (`vnd.google-apps.*`) apart
+    /// from regular files that simply lack an md5.
+    mime_type: String,
 }
 
 /// Run the initial reconciliation. Caller passes the engine wrapped in `Arc<dyn …>`
@@ -126,6 +130,15 @@ pub async fn initial(
     //    Files matching by md5 (in_both with equal fingerprint) are recorded but NOT
     //    re-uploaded.
     for local in &local_files {
+        // A shortcut the daemon wrote for a native Google Doc (issue #3) lives on
+        // disk as a pointer file with a `skipped` row — never upload it to Drive.
+        if let Some(it) =
+            items::get_by_relative_path(db.connection(), mapping_id, &local.relative_path).await?
+        {
+            if it.state == ItemState::Skipped {
+                continue;
+            }
+        }
         let local_path = local_root.join(&local.relative_path);
         let (size, md5) = fingerprint::compute_local(&local_path).await?;
         let (parent_rel, file_name) = split_parent(&local.relative_path);
@@ -174,10 +187,25 @@ pub async fn initial(
             continue;
         }
         let Some(md5) = remote.md5.clone() else {
-            tracing::info!(
-                relative_path = %remote.relative_path,
-                "skipping remote file with no md5 (likely native Google Docs)"
-            );
+            if shortcut::is_native(&remote.mime_type) {
+                // Native Google Doc → write a local shortcut pointer instead of
+                // downloading bytes that don't exist (issue #3). Idempotent: a
+                // pre-existing row (e.g. a re-run) is left untouched.
+                let rel = shortcut::relative_path(&remote.relative_path, &remote.mime_type);
+                if items::get_by_relative_path(db.connection(), mapping_id, &rel)
+                    .await?
+                    .is_none()
+                {
+                    let body = shortcut::content(&remote.mime_type, &remote.id);
+                    shortcut::write(&local_root.join(&rel), &body).await?;
+                    record_skipped_shortcut(db, mapping_id, &rel, &remote.id).await?;
+                }
+            } else {
+                tracing::info!(
+                    relative_path = %remote.relative_path,
+                    "skipping remote file with no md5"
+                );
+            }
             continue;
         };
         let local_path = local_root.join(&remote.relative_path);
@@ -273,6 +301,7 @@ async fn walk_remote(http: &DriveHttp, root_id: &str) -> Result<Vec<RemoteEntry>
                     is_dir: true,
                     size: 0,
                     md5: None,
+                    mime_type: c.mime_type,
                 });
                 queue.push_back((c.id, rel));
             } else {
@@ -282,6 +311,7 @@ async fn walk_remote(http: &DriveHttp, root_id: &str) -> Result<Vec<RemoteEntry>
                     is_dir: false,
                     size: c.size.unwrap_or(0),
                     md5: c.md5,
+                    mime_type: c.mime_type,
                 });
             }
         }
@@ -361,6 +391,33 @@ async fn record_synced_dir(
             local_inode: None,
             last_synced_at: unix_now(),
             state: ItemState::Synced,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Record a native Google Doc shortcut as a `skipped`, md5-less file `sync_item`.
+/// The on-disk pointer is written by the caller; this row keeps the daemon from
+/// uploading it back and lets `air-drive status` surface it (issue #3).
+async fn record_skipped_shortcut(
+    db: &Db,
+    mapping_id: MappingId,
+    relative_path: &str,
+    remote_id: &str,
+) -> Result<()> {
+    items::insert(
+        db.connection(),
+        &NewSyncItem {
+            mapping_id,
+            relative_path: relative_path.to_owned(),
+            kind: ItemKind::File,
+            remote_id: Some(remote_id.to_owned()),
+            size: None,
+            md5: None,
+            local_inode: None,
+            last_synced_at: unix_now(),
+            state: ItemState::Skipped,
         },
     )
     .await?;

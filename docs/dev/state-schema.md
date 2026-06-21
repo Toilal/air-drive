@@ -16,7 +16,7 @@ sibling `src/state/*.rs` files.
 - `MIGRATIONS` is a **forward-only** ladder: `MIGRATIONS[i]` moves the DB from
   version `i` to `i + 1`. Each migration carries only the schema additions of
   its version.
-- The current `LATEST_VERSION` is **4**.
+- The current `LATEST_VERSION` is **5**.
 
 | Version | Adds                                                                                  |
 | ------- | ------------------------------------------------------------------------------------- |
@@ -24,6 +24,7 @@ sibling `src/state/*.rs` files.
 | v2      | `state_meta` — single-row surfaceable daemon state (blocked + last-sync counters).    |
 | v3      | `folder_mapping.remote_folder_spec` — the original CLI `<remote-folder>` spec, kept so the daemon can re-resolve / recreate the remote root if it was trashed on Drive between runs. |
 | v4      | `sync_item.trashed_at` (nullable epoch) — tombstone marker: a file trashed on Drive keeps its row (and `remote_id`) so a restore re-links instead of duplicating (#8). A start-up GC reclaims tombstones older than 30 days. |
+| v5      | Adds the `write_shortcut` operation to `pending_operation.op`. Native Google Docs are materialised as local shortcut files (#3); the dispatcher needs a dedicated op to write them. SQLite can't alter a CHECK in place, so the table is rebuilt with the extended `op` set (rows copied, index recreated). Nothing FK-references `pending_operation`, so the drop/rename is safe inside the migration transaction. |
 
 To add a schema change: append a new `Vn_SCHEMA` constant, push it onto
 `MIGRATIONS`, and bump `LATEST_VERSION`. Never edit a shipped migration in place.
@@ -87,7 +88,7 @@ Queued atomic operations awaiting the dispatcher.
 | ----------------- | ------- | --------------------------------------------------------------------- |
 | `id`              | INTEGER | PK (autoincrement).                                                   |
 | `sync_item_id`    | INTEGER | FK → `sync_item(id)` `ON DELETE CASCADE`.                             |
-| `op`              | TEXT    | `upload`, `download`, `delete_local`, `delete_remote`, `rename_local`, `rename_remote`, `create_dir_local`, `create_dir_remote`, `mark_conflict`. |
+| `op`              | TEXT    | `upload`, `download`, `delete_local`, `delete_remote`, `rename_local`, `rename_remote`, `create_dir_local`, `create_dir_remote`, `write_shortcut`, `mark_conflict`. |
 | `payload`         | TEXT    | Op-specific JSON (nullable).                                          |
 | `attempts`        | INTEGER | Retry counter (default 0).                                            |
 | `next_attempt_at` | INTEGER | Unix epoch; indexed for due-row scans.                               |

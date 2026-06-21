@@ -13,7 +13,7 @@
 //! `specs/001-minimal-sync-daemon/data-model.md`.
 
 /// Latest schema version this binary knows how to apply.
-pub const LATEST_VERSION: i64 = 4;
+pub const LATEST_VERSION: i64 = 5;
 
 /// Unconditional bootstrap: ensures `schema_version` exists so the migration runner can
 /// always read it. Idempotent.
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 /// Forward-only migrations. Index `i` is the SQL block to apply when moving from schema
 /// version `i` to `i+1`. The bootstrap step above already created `schema_version` so
 /// migrations only carry the **schema additions** of their version.
-pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA];
+pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA, V5_SCHEMA];
 
 const V1_SCHEMA: &str = r#"
 -- linked Google Drive account (single row in MVP, id=1)
@@ -126,6 +126,43 @@ INSERT INTO state_meta (id) VALUES (1);
 /// instead of duplicating. A retention GC reclaims old tombstones (issue #8).
 const V4_SCHEMA: &str = r#"
 ALTER TABLE sync_item ADD COLUMN trashed_at INTEGER;
+"#;
+
+/// v5 — add the `write_shortcut` operation. Native Google Docs are now materialised
+/// as local shortcut files (issue #3); the dispatcher needs a dedicated op to write
+/// them. SQLite cannot alter a CHECK constraint in place, so `pending_operation` is
+/// rebuilt with the extended `op` set. Nothing foreign-key-references the table, so
+/// the drop/rename is safe inside the migration transaction. Existing queued rows are
+/// copied across verbatim and the due-row index is recreated.
+const V5_SCHEMA: &str = r#"
+CREATE TABLE pending_operation_v5 (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sync_item_id    INTEGER NOT NULL REFERENCES sync_item(id) ON DELETE CASCADE,
+    op              TEXT NOT NULL CHECK(op IN (
+                        'upload','download',
+                        'delete_local','delete_remote',
+                        'rename_local','rename_remote',
+                        'create_dir_local','create_dir_remote',
+                        'write_shortcut',
+                        'mark_conflict'
+                    )),
+    payload         TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL,
+    last_error      TEXT,
+    enqueued_at     INTEGER NOT NULL
+);
+
+INSERT INTO pending_operation_v5
+    (id, sync_item_id, op, payload, attempts, next_attempt_at, last_error, enqueued_at)
+SELECT id, sync_item_id, op, payload, attempts, next_attempt_at, last_error, enqueued_at
+FROM pending_operation;
+
+DROP TABLE pending_operation;
+ALTER TABLE pending_operation_v5 RENAME TO pending_operation;
+
+CREATE INDEX pending_operation_next_attempt
+    ON pending_operation(next_attempt_at);
 "#;
 
 /// v3 — persist the original `<remote-folder>` CLI spec on the mapping row.

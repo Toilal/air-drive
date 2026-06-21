@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::state::Db;
 use crate::state::meta::{self, BlockedKind};
 use crate::state::ops::Operation;
-use crate::state::{accounts, conflicts, mapping, ops};
+use crate::state::{accounts, conflicts, items, mapping, ops};
 
 /// `air-drive status [--json]` entry point.
 pub async fn run(config_dir_override: Option<&Path>, as_json: bool) -> Result<ExitCode> {
@@ -61,6 +61,13 @@ pub async fn collect(db: &Db, pid: Option<u32>) -> Result<Value> {
 
     let blocked = meta::get_blocked(db.connection()).await?;
     let (last_sync_at, items_uploaded, items_downloaded) = meta::last_sync(db.connection()).await?;
+
+    // Native Google Docs are represented as local shortcut files and tracked as
+    // `skipped` items (issue #3). Surface them so they are visible, not invisible.
+    let skipped_items = match &mapping_row {
+        Some(m) => items::list_skipped(db.connection(), m.id).await?,
+        None => Vec::new(),
+    };
 
     let total_pending: i64 = op_counts.values().sum();
     let state = if blocked.is_some() {
@@ -153,6 +160,20 @@ pub async fn collect(db: &Db, pid: Option<u32>) -> Result<Value> {
         },
     );
     snapshot.insert("conflicts".into(), Value::Array(conflicts_json));
+
+    // Skipped items — native Google Docs surfaced as local shortcut files (issue #3).
+    let skipped_paths: Vec<Value> = skipped_items
+        .iter()
+        .map(|i| Value::String(i.relative_path.clone()))
+        .collect();
+    snapshot.insert(
+        "skipped".into(),
+        json!({
+            "count": skipped_items.len(),
+            "paths": skipped_paths,
+        }),
+    );
+
     snapshot.insert("pid".into(), pid.map(|p| json!(p)).unwrap_or(Value::Null));
     snapshot.insert("rclone".into(), Value::Null);
 
@@ -199,6 +220,13 @@ fn print_human(s: &Value) {
                 c["original_path"].as_str().unwrap_or("?"),
                 c["conflict_path"].as_str().unwrap_or("?"),
             );
+        }
+    }
+    let skipped = s["skipped"]["count"].as_i64().unwrap_or(0);
+    if skipped > 0 {
+        println!("skipped        : {skipped} native Google Docs (as shortcut files)");
+        for p in s["skipped"]["paths"].as_array().unwrap_or(&Vec::new()) {
+            println!("  - {}", p.as_str().unwrap_or("?"));
         }
     }
     match s["pid"].as_i64() {

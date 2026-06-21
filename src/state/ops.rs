@@ -32,6 +32,10 @@ pub enum Operation {
     CreateDirLocal,
     /// Create a remote directory.
     CreateDirRemote,
+    /// Write a local shortcut file pointing at a native Google Doc (issue #3). The
+    /// payload carries the file body under `"content"`. One-directional: the
+    /// dispatcher writes the pointer but never uploads it back.
+    WriteShortcut,
     /// Mark the item as a conflict and rename the local copy.
     MarkConflict,
 }
@@ -47,6 +51,7 @@ impl Operation {
             Operation::RenameRemote => "rename_remote",
             Operation::CreateDirLocal => "create_dir_local",
             Operation::CreateDirRemote => "create_dir_remote",
+            Operation::WriteShortcut => "write_shortcut",
             Operation::MarkConflict => "mark_conflict",
         }
     }
@@ -61,6 +66,7 @@ impl Operation {
             "rename_remote" => Operation::RenameRemote,
             "create_dir_local" => Operation::CreateDirLocal,
             "create_dir_remote" => Operation::CreateDirRemote,
+            "write_shortcut" => Operation::WriteShortcut,
             "mark_conflict" => Operation::MarkConflict,
             other => {
                 return Err(rusqlite::Error::FromSqlConversionFailure(
@@ -305,6 +311,27 @@ mod tests {
         let counts = count_by_op(db.connection()).await.unwrap();
         assert_eq!(counts.get(&Operation::Upload).copied().unwrap_or(0), 2);
         assert_eq!(counts.get(&Operation::Download).copied().unwrap_or(0), 1);
+    }
+
+    #[tokio::test]
+    async fn write_shortcut_op_round_trips_through_db() {
+        // Exercises the v5 migration's extended `op` CHECK: a `write_shortcut`
+        // row must insert and read back as the right variant.
+        let (_tmp, db, item_id) = open_temp_with_item().await;
+        let payload = r#"{"content":"{}"}"#;
+        let op_id = enqueue(
+            db.connection(),
+            item_id,
+            Operation::WriteShortcut,
+            Some(payload),
+            0,
+        )
+        .await
+        .unwrap();
+        let due = next_due(db.connection(), 1).await.unwrap().unwrap();
+        assert_eq!(due.id, op_id);
+        assert_eq!(due.op, Operation::WriteShortcut);
+        assert_eq!(due.payload.as_deref(), Some(payload));
     }
 
     #[tokio::test]

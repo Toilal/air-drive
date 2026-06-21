@@ -76,13 +76,17 @@ air-drive resume
 ### `status`
 
 Print the current daemon state (account, mapping, pending counters, blocked
-state).
+state, unresolved conflicts, and any skipped items).
 
 ```sh
 air-drive status [--json]
 ```
 
 - `--json` — emit machine-readable JSON instead of the human summary.
+
+The `skipped` section lists **native Google Docs** (Docs, Sheets, Slides, …),
+which cannot be synced as plain files and are instead represented locally as
+shortcut files — see [configuration.md](configuration.md#native-google-docs).
 
 ### `unlink`
 

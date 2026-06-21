@@ -6,7 +6,8 @@
 //! - [`apply_remote`] — `RemoteChange` → same, on the Drive side.
 //!
 //! Both consult `sync_item` to suppress echoes (a change we caused via our own
-//! upload) and to skip native Google Docs.
+//! upload) and to represent native Google Docs as local shortcut files
+//! ([`crate::reconcile::shortcut`]).
 //!
 //! The functions are stateless beyond the database — they don't talk to the
 //! engine; the dispatcher (`daemon::runtime`) does.
@@ -18,17 +19,13 @@ use serde_json::json;
 use crate::daemon::in_flight::InFlightOps;
 use crate::drive::changes::RemoteChange;
 use crate::error::{Error, Result};
+use crate::reconcile::shortcut;
 use crate::state::Db;
-use crate::state::items::{self, ItemKind, ItemState, NewSyncItem};
+use crate::state::items::{self, ItemId, ItemKind, ItemState, NewSyncItem};
 use crate::state::mapping::MappingId;
 use crate::state::ops::{self, Operation};
 use crate::state::unix_now;
 use crate::watch::WatchEvent;
-
-/// Native Google Docs / Sheets / Slides mime prefix. These do not have an md5
-/// and cannot be synced as opaque bytes — skipped silently (the poller still
-/// observes them; the reconciler is the gate).
-const NATIVE_GAPPS_PREFIX: &str = "application/vnd.google-apps.";
 
 /// Convert a `WatchEvent` into `pending_operation` rows.
 pub async fn apply_local(
@@ -89,6 +86,12 @@ pub async fn apply_local(
             // skips the engine call. The fingerprint we persist is then
             // guaranteed to match the bytes we actually pushed.
             match items::get_by_relative_path(db.connection(), mapping_id, &rel).await? {
+                Some(item) if item.state == ItemState::Skipped => {
+                    // A shortcut file the daemon wrote for a native Google Doc
+                    // (issue #3). It lives only on disk as a pointer — never upload
+                    // it back to Drive, and ignore the watcher echo of our own write.
+                    return Ok(());
+                }
                 Some(item) => {
                     ops::enqueue(
                         db.connection(),
@@ -299,13 +302,55 @@ pub async fn apply_remote(
         }
         return Ok(());
     }
-    if file.mime_type.starts_with(NATIVE_GAPPS_PREFIX) {
-        tracing::info!(
-            id = %file.id,
-            name = %file.name,
-            mime = %file.mime_type,
-            "skipping native Google Docs file"
-        );
+    if shortcut::is_native(&file.mime_type) {
+        // Native Google Doc/Sheet/Slide: no md5, no opaque byte stream. Instead of
+        // skipping silently we materialise a local shortcut file (issue #3). Its
+        // path is the doc's path plus a per-type extension (`Notes` → `Notes.gdoc`),
+        // and its `sync_item` is marked `skipped` so the local watcher never tries
+        // to upload the pointer and `status` can surface it.
+        let base = change
+            .relative_path
+            .clone()
+            .unwrap_or_else(|| file.name.clone());
+        let rel = shortcut::relative_path(&base, &file.mime_type);
+        match items::get_by_remote_id(db.connection(), &change.file_id).await? {
+            None => {
+                let new_id = items::insert(
+                    db.connection(),
+                    &NewSyncItem {
+                        mapping_id,
+                        relative_path: rel,
+                        kind: ItemKind::File,
+                        remote_id: Some(file.id.clone()),
+                        size: None,
+                        md5: None,
+                        local_inode: None,
+                        last_synced_at: 0,
+                        state: ItemState::Skipped,
+                    },
+                )
+                .await?;
+                enqueue_write_shortcut(db, new_id, &file.mime_type, &file.id).await?;
+            }
+            Some(existing) if existing.relative_path != rel => {
+                // The doc was renamed on Drive → rename the local shortcut to match.
+                let payload = json!({ "new_relative_path": rel }).to_string();
+                ops::enqueue(
+                    db.connection(),
+                    existing.id,
+                    Operation::RenameLocal,
+                    Some(&payload),
+                    unix_now(),
+                )
+                .await?;
+            }
+            Some(existing) if existing.trashed_at.is_some() => {
+                // Restored from trash → clear the tombstone and re-write the pointer.
+                items::clear_trashed(db.connection(), existing.id).await?;
+                enqueue_write_shortcut(db, existing.id, &file.mime_type, &file.id).await?;
+            }
+            Some(_) => { /* unchanged (e.g. a content edit) — the pointer is stable */ }
+        }
         return Ok(());
     }
     let Some(remote_md5) = file.md5.clone() else {
@@ -435,6 +480,21 @@ pub async fn apply_remote(
     Ok(())
 }
 
+/// Enqueue a [`Operation::WriteShortcut`] for a native Google Doc, rendering the
+/// pointer body into the op payload so the dispatcher only has to write bytes.
+async fn enqueue_write_shortcut(db: &Db, item_id: ItemId, mime: &str, id: &str) -> Result<()> {
+    let payload = json!({ "content": shortcut::content(mime, id) }).to_string();
+    ops::enqueue(
+        db.connection(),
+        item_id,
+        Operation::WriteShortcut,
+        Some(&payload),
+        unix_now(),
+    )
+    .await?;
+    Ok(())
+}
+
 fn strip_root(absolute: &Path, root: &Path) -> Result<String> {
     let rel = absolute
         .strip_prefix(root)
@@ -442,4 +502,171 @@ fn strip_root(absolute: &Path, root: &Path) -> Result<String> {
     Ok(rel
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::changes::FileSnapshot;
+    use crate::state::{accounts, mapping};
+
+    const DOC_MIME: &str = "application/vnd.google-apps.document";
+
+    async fn setup() -> (tempfile::TempDir, Db, MappingId) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("state.db")).await.unwrap();
+        let account_id = accounts::upsert(db.connection(), "alice@gmail.com", 1)
+            .await
+            .unwrap();
+        let mapping_id = mapping::upsert(
+            db.connection(),
+            account_id,
+            "/home/alice",
+            "root-id",
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        (tmp, db, mapping_id)
+    }
+
+    fn native_change(id: &str, name: &str, rel: &str) -> RemoteChange {
+        RemoteChange {
+            file_id: id.to_owned(),
+            removed: false,
+            file: Some(FileSnapshot {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                mime_type: DOC_MIME.to_owned(),
+                size: None,
+                md5: None,
+                parents: vec!["root-id".to_owned()],
+                trashed: false,
+            }),
+            relative_path: Some(rel.to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_doc_creates_skipped_item_and_write_shortcut_op() {
+        let (_tmp, db, mapping_id) = setup().await;
+        let in_flight = InFlightOps::new();
+        apply_remote(
+            native_change("doc1", "Notes", "Notes"),
+            &db,
+            mapping_id,
+            Path::new("/home/alice"),
+            &in_flight,
+        )
+        .await
+        .unwrap();
+
+        // A skipped, md5-less shortcut item is tracked at the doc path + `.gdoc`.
+        let item = items::get_by_relative_path(db.connection(), mapping_id, "Notes.gdoc")
+            .await
+            .unwrap()
+            .expect("shortcut item should exist");
+        assert_eq!(item.state, ItemState::Skipped);
+        assert_eq!(item.remote_id.as_deref(), Some("doc1"));
+        assert_eq!(item.md5, None);
+
+        // A WriteShortcut op carrying a valid JSON pointer body is queued.
+        let op = ops::next_due(db.connection(), unix_now() + 1)
+            .await
+            .unwrap()
+            .expect("a write_shortcut op should be queued");
+        assert_eq!(op.op, Operation::WriteShortcut);
+        let payload: serde_json::Value =
+            serde_json::from_str(op.payload.as_deref().unwrap()).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(payload["content"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            body["url"].as_str().unwrap(),
+            "https://docs.google.com/document/d/doc1/edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_doc_rename_enqueues_rename_local() {
+        let (_tmp, db, mapping_id) = setup().await;
+        let in_flight = InFlightOps::new();
+        let root = Path::new("/home/alice");
+        apply_remote(
+            native_change("doc1", "Notes", "Notes"),
+            &db,
+            mapping_id,
+            root,
+            &in_flight,
+        )
+        .await
+        .unwrap();
+        // Drain the initial WriteShortcut op so the rename op is the next due one.
+        let first = ops::next_due(db.connection(), unix_now() + 1)
+            .await
+            .unwrap()
+            .unwrap();
+        ops::delete(db.connection(), first.id).await.unwrap();
+
+        // Same doc, renamed on Drive.
+        apply_remote(
+            native_change("doc1", "Renamed", "Renamed"),
+            &db,
+            mapping_id,
+            root,
+            &in_flight,
+        )
+        .await
+        .unwrap();
+
+        let op = ops::next_due(db.connection(), unix_now() + 1)
+            .await
+            .unwrap()
+            .expect("a rename_local op should be queued");
+        assert_eq!(op.op, Operation::RenameLocal);
+        let payload: serde_json::Value =
+            serde_json::from_str(op.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            payload["new_relative_path"].as_str().unwrap(),
+            "Renamed.gdoc"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_local_does_not_upload_shortcut_files() {
+        let (tmp, db, mapping_id) = setup().await;
+        let root = tmp.path();
+        // A shortcut pointer the daemon already wrote: a `skipped` row + the file.
+        items::insert(
+            db.connection(),
+            &NewSyncItem {
+                mapping_id,
+                relative_path: "Notes.gdoc".into(),
+                kind: ItemKind::File,
+                remote_id: Some("doc1".into()),
+                size: None,
+                md5: None,
+                local_inode: None,
+                last_synced_at: 0,
+                state: ItemState::Skipped,
+            },
+        )
+        .await
+        .unwrap();
+        let path = root.join("Notes.gdoc");
+        tokio::fs::write(&path, "{}\n").await.unwrap();
+
+        // The watcher echo of our own write must NOT enqueue an upload.
+        apply_local(WatchEvent::Created(path), &db, mapping_id, root)
+            .await
+            .unwrap();
+        assert!(
+            ops::next_due(db.connection(), unix_now() + 1)
+                .await
+                .unwrap()
+                .is_none(),
+            "no upload should be queued for a shortcut file"
+        );
+    }
 }

@@ -84,6 +84,20 @@
         }
       }
     },
+    "skipped": {
+      "type": "object",
+      "description": "Items the daemon deliberately does not sync as opaque bytes — native Google Docs, surfaced as local shortcut files (issue #3). Present so these are visible rather than silently absent.",
+      "required": ["count", "paths"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "paths": {
+          "type": "array",
+          "description": "Relative paths of the shortcut files, e.g. \"Notes.gdoc\".",
+          "items": { "type": "string" }
+        }
+      }
+    },
     "pid": {
       "type": ["integer", "null"],
       "description": "PID of the running daemon if any; null when status is run while no daemon is up."

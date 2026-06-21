@@ -80,6 +80,22 @@ The default `ignore_patterns` cover well-known editor/OS scratch files:
 - **JetBrains** — `*.___jb_tmp___`, `*.___jb_old___`
 - **OS metadata** — `.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`
 
+## Native Google Docs
+
+Google's own formats — Docs, Sheets, Slides, Drawings, Forms — are not stored as
+regular files on Drive and have no downloadable bytes, so they can't be synced
+like ordinary documents. air-drive represents each one locally as a small
+**shortcut file**: a JSON pointer named after the doc with a type-specific
+extension (a Doc `Notes` → `Notes.gdoc`, a Sheet `Budget` → `Budget.gsheet`,
+Slides → `.gslides`, anything else → `.glink`). Opening it gives you the doc's
+web URL so you can jump straight to it in the browser.
+
+These shortcuts are **one-way**: air-drive creates, renames, and removes them to
+follow the doc on Drive, but never uploads a shortcut back. Editing or deleting a
+`.gdoc` file locally does **not** change the underlying Google Doc. Every shortcut
+is listed under the `skipped` section of [`air-drive status`](cli.md#status) so
+these files are visible rather than silently missing.
+
 ## Auto-migration
 
 On startup air-drive auto-migrates `config.toml` to the current shape,

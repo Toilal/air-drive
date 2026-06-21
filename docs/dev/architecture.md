@@ -38,7 +38,7 @@ loops drain whatever is in flight, and `daemon::run` returns cleanly.
 | `daemon/`     | Orchestration: the event loop (`mod.rs`), the op dispatcher (`runtime.rs`), single-instance lock (`lock.rs`), pause/resume control socket (`pause.rs`), in-flight op tracking (`in_flight.rs`). |
 | `drive/`      | Google Drive REST client: OAuth (`auth.rs`), HTTP plumbing (`http.rs`), `changes.list` polling (`changes.rs`), metadata helpers (`metadata.rs`). |
 | `engine/`     | The `SyncEngine` trait (`mod.rs`) and its implementations: `RcloneEngine` (`rclone.rs`), an HTTP-based engine (`http.rs`), rclone binary resolution (`rclone_path.rs`), verified auto-download (`rclone_download.rs`), staging dirs (`staging.rs`). |
-| `reconcile/`  | Turns events into operations: the one-shot initial pass (`mod.rs`), continuous `apply_local`/`apply_remote` (`continuous.rs`), conflict handling (`conflict.rs`), content fingerprinting (`fingerprint.rs`). |
+| `reconcile/`  | Turns events into operations: the one-shot initial pass (`mod.rs`), continuous `apply_local`/`apply_remote` (`continuous.rs`), conflict handling (`conflict.rs`), content fingerprinting (`fingerprint.rs`), native-doc shortcut files (`shortcut.rs`). |
 | `state/`      | SQLite persistence: schema + migrations (`schema.rs`), and typed accessors per table (`accounts.rs`, `mapping.rs`, `items.rs`, `ops.rs`, `cursor.rs`, `conflicts.rs`, `meta.rs`). |
 | `watch/`      | Local filesystem watcher (`notify`) and debouncer (`debounce.rs`).                              |
 | `observability.rs` | Logging / tracing setup.                                                                    |

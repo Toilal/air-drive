@@ -425,6 +425,31 @@ pub async fn list_for_mapping(conn: &Connection, mapping_id: MappingId) -> Resul
     .map_err(Into::into)
 }
 
+/// List the live (non-tombstoned) skipped items of a mapping, ordered by path.
+///
+/// Skipped items are things the daemon deliberately does not sync as opaque bytes —
+/// today, native Google Docs represented as local shortcut files (issue #3).
+/// `air-drive status` surfaces them so they are visible rather than silently absent.
+pub async fn list_skipped(conn: &Connection, mapping_id: MappingId) -> Result<Vec<SyncItem>> {
+    conn.call(move |c| {
+        let mut stmt = c.prepare(
+            "SELECT id, mapping_id, relative_path, kind, remote_id, size, md5, local_inode,
+                    last_synced_at, state, trashed_at
+             FROM sync_item
+             WHERE mapping_id = ?1 AND state = 'skipped' AND trashed_at IS NULL
+             ORDER BY relative_path",
+        )?;
+        let rows = stmt.query_map(params![mapping_id.0], row_to_item)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(Into::into)
+}
+
 fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncItem> {
     let kind_s: String = row.get(3)?;
     let state_s: String = row.get(9)?;
@@ -681,6 +706,31 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn list_skipped_returns_only_live_skipped_items() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let conn = db.connection();
+        // A synced file, a live skipped shortcut, and a tombstoned skipped one.
+        insert(conn, &sample(mapping_id, "regular.txt"))
+            .await
+            .unwrap();
+        let shortcut = NewSyncItem {
+            state: ItemState::Skipped,
+            ..sample(mapping_id, "Notes.gdoc")
+        };
+        insert(conn, &shortcut).await.unwrap();
+        let trashed = NewSyncItem {
+            state: ItemState::Skipped,
+            ..sample(mapping_id, "Gone.gdoc")
+        };
+        let trashed_id = insert(conn, &trashed).await.unwrap();
+        mark_trashed(conn, trashed_id, 123).await.unwrap();
+
+        let skipped = list_skipped(conn, mapping_id).await.unwrap();
+        let paths: Vec<_> = skipped.iter().map(|i| i.relative_path.as_str()).collect();
+        assert_eq!(paths, vec!["Notes.gdoc"]);
     }
 
     #[tokio::test]

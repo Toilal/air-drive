@@ -64,9 +64,28 @@ tracker (`daemon/in_flight.rs`) covers the window where an op is mid-execution.
 
 ## Native Google Docs
 
-Native Google formats (`application/vnd.google-apps.*` — Docs, Sheets, Slides)
-have no md5 and cannot be synced as opaque bytes. The poller still observes
-them, but the reconciler is the gate: they are **skipped silently**.
+Native Google formats (`application/vnd.google-apps.*` — Docs, Sheets, Slides,
+Drawings, …) have no md5 and no byte stream Drive will hand us, so they cannot be
+synced as opaque files. Instead of leaving them invisible, the daemon writes a
+**local shortcut file**: a small JSON pointer carrying the doc's web URL and Drive
+id (mirroring the Google Drive desktop client's `.gdoc`/`.gsheet`/`.gslides`
+files). The mime → extension/URL mapping lives in `reconcile/shortcut.rs`.
+
+- **Naming**: the pointer sits at the doc's path plus a per-type extension, e.g. a
+  Google Doc named `Notes` becomes `Notes.gdoc`; a Sheet `Budget` → `Budget.gsheet`.
+  Unknown native types fall back to `.glink`.
+- **One-directional**: shortcuts are written, renamed, and removed to track the
+  remote doc, but **never uploaded back**. Their `sync_item` rows carry
+  `state = skipped`, which both surfaces them in `air-drive status` (the `skipped`
+  block) and tells `apply_local` to ignore the on-disk pointer instead of treating
+  it as a regular file to upload.
+- **Flow**: `apply_remote` (continuous) and the initial reconciliation pass detect
+  a native doc, persist the `skipped` row, and write the pointer — the continuous
+  path via a queued `write_shortcut` operation (the dispatcher renders the payload
+  to disk), the initial pass synchronously. A rename on Drive enqueues a
+  `rename_local` to move the pointer; a trash/delete flows through the normal
+  `delete_local` path (matched by `remote_id`), removing the pointer. A content
+  edit of the doc is a no-op — the pointer URL is stable.
 
 ## Initial reconciliation
 

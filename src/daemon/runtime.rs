@@ -378,6 +378,20 @@ async fn execute(
             items::set_state(db.connection(), item.id, items::ItemState::Synced).await?;
         }
 
+        Operation::WriteShortcut => {
+            // Native Google Doc → local pointer file (issue #3). The reconciler put
+            // the rendered JSON body in the payload; we just write it where the
+            // shortcut lives. The item keeps `state = skipped` so the local watcher
+            // never tries to upload the pointer, and `status` surfaces it.
+            let body = parse_payload(&op.payload)
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| Error::Mapping("WriteShortcut op missing content".into()))?;
+            let local = local_root.join(&item.relative_path);
+            crate::reconcile::shortcut::write(&local, &body).await?;
+        }
+
         Operation::RenameRemote => {
             let payload = parse_payload(&op.payload);
             let new_rel = payload
