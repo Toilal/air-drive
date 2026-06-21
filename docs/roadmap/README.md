@@ -53,6 +53,7 @@ the current status.
 | 170 | [v1.0 self-contained bundles](170-v1-bundles.md)                   | —        | —     |
 | 180 | [OAuth Production verification](180-oauth-production.md)           | —        | —     |
 | 190 | [Native Rust engine](190-native-engine.md)                        | —        | —     |
+| 200 | [Streaming mode (on-demand virtual files)](200-streaming-mode.md) | —        | —     |
 
 ## Maintaining this folder
 
