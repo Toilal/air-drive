@@ -131,7 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = build_provider(&oauth, &args.config_dir, None).await?;
     // Force a token fetch so the persistence callback runs.
     let _access = provider.token().await?;
-    let tokens_json = std::fs::read_to_string(&tokens_path)?;
+    // yup-oauth2 flushes tokens.json slightly *after* `token()` returns, so a read
+    // here races the write and can see an empty/partial file. Poll until the file
+    // is a valid token array carrying a refresh token before trusting it.
+    let tokens_json = read_tokens_when_ready(&tokens_path).await?;
     eprintln!("[setup] tokens.json written ({} bytes)", tokens_json.len());
 
     // 2. Parent folder. Try to find an existing one with the same name first to
@@ -209,6 +212,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[setup] ✓ all 4 secrets pushed");
     eprintln!("[setup] trigger the workflow with: gh workflow run e2e");
     Ok(())
+}
+
+/// Read `tokens.json` once yup-oauth2 has actually flushed it. `token()` can
+/// return before the on-disk write completes, so an immediate read races the
+/// writer and may see an empty or partial file (which then gets pushed as an
+/// empty `AIR_DRIVE_E2E_TOKENS` secret). Poll for up to ~5 s until the file
+/// parses as a token array carrying a refresh token.
+async fn read_tokens_when_ready(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    for _ in 0..100 {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            if !s.trim().is_empty() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    let has_refresh = v.as_array().is_some_and(|a| {
+                        a.iter().any(|e| {
+                            e.pointer("/token/refresh_token")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some()
+                        })
+                    });
+                    if has_refresh {
+                        return Ok(s);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "tokens.json at {} never became a valid token file (no refresh_token after 5s)",
+        path.display()
+    )
+    .into())
 }
 
 /// Refuse to start when `gh auth status` exits non-zero — saves the user from

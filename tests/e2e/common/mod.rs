@@ -337,6 +337,12 @@ impl DaemonProcess {
         let mut cmd: tokio::process::Command = fx.air_drive_cmd().into();
         cmd.env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "0");
         cmd.arg("start");
+        // The harness always starts from a fresh config dir (empty change cursor),
+        // and the daemon refuses a first-time continuous start without an explicit
+        // initial pass ("first-time start requires --initial-sync"). Every
+        // continuous-daemon scenario seeds local/remote state it then expects the
+        // daemon to reconcile, so the initial sync is exactly what they want.
+        cmd.arg("--initial-sync");
         for a in extra_args {
             cmd.arg(a);
         }
