@@ -80,31 +80,105 @@ pub async fn run(
         "      Click 'Enable', then press Enter: ",
     )?;
 
-    // Step 3a — consent screen "Branding" (Auth Platform setup wizard).
+    // Step 3 — consent screen "Branding" + audience. The audience choice is
+    // what decides whether the client hits the 7-day refresh-token cap:
+    //   - Internal (Workspace orgs only): no cap, no verification, no
+    //     test-user list — the cleanest path when the account allows it.
+    //   - External (personal @gmail.com): sensitive-scope clients left in
+    //     'Testing' cap refresh tokens at 7 days; publishing to 'Production'
+    //     lifts the cap (an 'unverified app' warning remains, harmless for a
+    //     personal client). See docs/user/oauth-setup.md.
     writeln!(stdout)?;
     writeln!(
         stdout,
         "[3/5] Configure the Auth Platform (consent + audience)"
     )?;
+    writeln!(stdout)?;
+    writeln!(stdout, "      Audience type:")?;
+    writeln!(
+        stdout,
+        "      - Internal: Google Workspace orgs only (e.g. you@company.com)."
+    )?;
+    writeln!(
+        stdout,
+        "        No 7-day token cap, no verification, no test-user list."
+    )?;
+    writeln!(
+        stdout,
+        "      - External: personal @gmail.com accounts. Sensitive-scope"
+    )?;
+    writeln!(
+        stdout,
+        "        clients in 'Testing' re-prompt every 7 days; this wizard then"
+    )?;
+    writeln!(
+        stdout,
+        "        walks you through publishing to Production to remove the cap."
+    )?;
+    writeln!(stdout)?;
+    let workspace = parse_yes(&prompt(
+        &mut stdin,
+        &mut stdout,
+        "      Is this Drive account part of a Google Workspace org? [y/N]: ",
+    )?);
+    writeln!(stdout)?;
     let url = format!("https://console.cloud.google.com/auth/overview/create?project={project_id}");
     open_or_print(&mut stdout, &url)?;
     writeln!(stdout, "      a. Branding (the form on this page):")?;
     writeln!(stdout, "         - App name: air-drive (or anything)")?;
     writeln!(stdout, "         - User support email: your Google email")?;
-    writeln!(stdout, "         - Audience: External")?;
+    if workspace {
+        writeln!(stdout, "         - Audience: Internal")?;
+    } else {
+        writeln!(stdout, "         - Audience: External")?;
+    }
     writeln!(stdout, "         - Contact info: your Google email")?;
     writeln!(stdout, "         - Click CREATE.")?;
-    writeln!(stdout)?;
-    writeln!(
-        stdout,
-        "      b. Then open the Audience tab (left menu) and"
-    )?;
-    writeln!(
-        stdout,
-        "         add your Google account email under 'Test users'."
-    )?;
-    let url = format!("https://console.cloud.google.com/auth/audience?project={project_id}");
-    open_or_print(&mut stdout, &url)?;
+    if workspace {
+        writeln!(stdout)?;
+        writeln!(
+            stdout,
+            "      Internal audience: no test users and no publishing step are"
+        )?;
+        writeln!(
+            stdout,
+            "      needed — your org's accounts are authorized automatically."
+        )?;
+    } else {
+        writeln!(stdout)?;
+        writeln!(
+            stdout,
+            "      b. Open the Audience tab (left menu) and add your Google"
+        )?;
+        writeln!(stdout, "         account email under 'Test users'.")?;
+        writeln!(stdout)?;
+        writeln!(
+            stdout,
+            "      c. To avoid weekly re-consent (the 7-day cap on sensitive"
+        )?;
+        writeln!(
+            stdout,
+            "         scopes in 'Testing' mode), click 'PUBLISH APP' on the"
+        )?;
+        writeln!(
+            stdout,
+            "         same Audience tab and confirm. At consent time Google"
+        )?;
+        writeln!(
+            stdout,
+            "         shows an 'unverified app' warning — expected for a"
+        )?;
+        writeln!(
+            stdout,
+            "         personal client; click 'Advanced -> Go to air-drive"
+        )?;
+        writeln!(
+            stdout,
+            "         (unsafe)'. Verification is only needed to share the app."
+        )?;
+        let url = format!("https://console.cloud.google.com/auth/audience?project={project_id}");
+        open_or_print(&mut stdout, &url)?;
+    }
     let _ = prompt(&mut stdin, &mut stdout, "      Press Enter when done: ")?;
 
     // Step 4 — OAuth Desktop client (new Auth Platform location).
@@ -221,6 +295,15 @@ fn prompt<R: BufRead, W: Write>(r: &mut R, w: &mut W, label: &str) -> Result<Str
     Ok(buf.trim().to_string())
 }
 
+/// Parse a yes/no answer, defaulting to **No** on an empty line or anything
+/// that isn't an explicit affirmative. Accepts `y` / `yes` (case-insensitive).
+/// The conservative default matters: a wrong "yes" steers the user to an
+/// Internal audience their account can't actually use, so the safe fallback is
+/// the External path that works for everyone.
+fn parse_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 /// GCP rule: 6-30 chars, lowercase letters/digits/hyphens, starts with a
 /// letter, doesn't end with a hyphen. Source: Google Cloud documentation
 /// "Creating and managing projects".
@@ -303,5 +386,22 @@ mod tests {
     #[test]
     fn client_secret_validator_rejects_wrong_prefix() {
         assert!(validate_client_secret("abc-secret").is_err());
+    }
+
+    #[test]
+    fn parse_yes_accepts_affirmatives() {
+        assert!(parse_yes("y"));
+        assert!(parse_yes("Y"));
+        assert!(parse_yes("yes"));
+        assert!(parse_yes("  YES  "));
+    }
+
+    #[test]
+    fn parse_yes_defaults_to_no() {
+        assert!(!parse_yes(""));
+        assert!(!parse_yes("n"));
+        assert!(!parse_yes("no"));
+        assert!(!parse_yes("nope"));
+        assert!(!parse_yes("external"));
     }
 }

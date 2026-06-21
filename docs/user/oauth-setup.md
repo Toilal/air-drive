@@ -21,9 +21,23 @@ Google classifies `drive` as a **sensitive** scope. OAuth clients left in
 `Testing` mode on the consent screen work fine but **cap refresh-token lifetime
 at 7 days** — so the daemon will prompt for re-consent roughly once a week.
 
-Moving a client to `Production` removes the cap but requires Google's OAuth
-verification review (security assessment, homepage + privacy-policy URLs,
-possibly a demo video).
+There are two ways to escape the cap for personal use, neither of which needs
+Google's full verification review:
+
+- **Internal audience** — only available when your Drive account belongs to a
+  Google Workspace organization (e.g. `you@company.com`). An Internal client has
+  no 7-day cap, no verification, and no test-user list. This is the cleanest
+  path when your account qualifies.
+- **External + Production** — for personal `@gmail.com` accounts. Create the
+  client as External, then **publish it to `Production`**. Publishing alone
+  lifts the 7-day cap (the cap is specific to `Testing`). Google still shows an
+  *"unverified app"* warning at consent time — harmless for a personal client
+  you own (click *Advanced → Go to air-drive (unsafe)*). Full verification
+  (security assessment, homepage + privacy-policy URLs, possibly a demo video)
+  is only required to **distribute** the app to other people.
+
+`air-drive init` (below) asks which case applies and walks you through the right
+steps, including publishing to Production for the External path.
 
 ## Using the embedded client
 
@@ -53,6 +67,13 @@ air-drive init --link
 `air-drive link` immediately afterwards. Use `--force` to overwrite an existing
 `[oauth].client_id`.
 
+During the consent-screen step it asks whether your Drive account is part of a
+Google Workspace organization and branches accordingly — **Internal** audience
+(no 7-day cap, no test users) for Workspace accounts, or **External** plus a
+**publish-to-Production** step for personal `@gmail.com` accounts, so you don't
+have to re-consent every week. See
+[Trade-off: token lifetime](#trade-off-token-lifetime-in-testing-mode) above.
+
 ### Manual
 
 If you prefer to do it by hand:
@@ -60,8 +81,13 @@ If you prefer to do it by hand:
 1. In the [Google Cloud Console](https://console.cloud.google.com/), create (or
    reuse) a project.
 2. Enable the **Google Drive API** for that project.
-3. Configure the **OAuth consent screen** (External), and add the
-   `.../auth/drive` scope.
+3. Configure the **OAuth consent screen** and add the `.../auth/drive` scope.
+   Pick the audience that avoids the 7-day cap:
+   - **Internal** if your account is in a Google Workspace org — done, no extra
+     step.
+   - **External** otherwise — add yourself under *Test users*, then click
+     **Publish app** to move it to `Production` (lifts the 7-day cap; the
+     *"unverified app"* warning at consent time is expected).
 4. Create an **OAuth client ID** of type **Desktop app**.
 5. Put the credentials into `config.toml`:
 

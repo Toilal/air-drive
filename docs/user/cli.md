@@ -118,7 +118,10 @@ air-drive setup [--install-service | --uninstall-service]
 ### `init`
 
 Bootstrap a personal Google Cloud OAuth client (Desktop) and write `[oauth]`
-into `config.toml`. Needed when the embedded `client_id` is unusable. See
+into `config.toml`. Needed when the embedded `client_id` is unusable. The wizard
+asks whether your account is in a Google Workspace org and branches between an
+**Internal** audience and an **External**-plus-**publish-to-Production** flow, so
+the resulting client isn't capped to 7-day token lifetimes. See
 [OAuth setup](oauth-setup.md).
 
 ```sh
