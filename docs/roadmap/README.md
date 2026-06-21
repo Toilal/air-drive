@@ -30,7 +30,6 @@ the current status.
 
 | #   | Feature                                                       | Priority  | Issue |
 | --- | ------------------------------------------------------------ | --------- | ----- |
-| 050 | [rclone auto-download](050-rclone-auto-download.md)          | —         | —     |
 | 060 | [Native Google Docs handling](060-native-google-docs.md)    | 🟡 medium | [#3](https://github.com/Toilal/air-drive/issues/3) |
 | 070 | [Interactive setup wizard](070-interactive-setup.md)        | —         | —     |
 | 080 | [Surface recovered state](080-surface-recovered-state.md)   | —         | —     |

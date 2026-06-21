@@ -98,6 +98,12 @@ webbrowser = "1"
 # Glob matching for the user-configurable watch.ignore_patterns list.
 globset = "0.4"
 
+# rclone auto-download (resolution step 4): SHA-256 verification of the release
+# archive and ZIP extraction of the binary. rclone ships only `.zip` archives on
+# every platform, so a zip reader is required; `deflate` is the only method rclone uses.
+sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"

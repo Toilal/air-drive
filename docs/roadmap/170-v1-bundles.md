@@ -13,8 +13,9 @@ a macOS `.app`, and a Windows installer — each embedding `rclone`.
 ## Today
 
 Distribution is the `install.sh` one-liner that downloads the release binary; the
-`rclone` binary is fetched separately (see
-[050 — rclone auto-download](050-rclone-auto-download.md)). No bundles yet.
+`rclone` binary is fetched separately on first run (auto-download with SHA-256
+verification, see [`../user/installation.md`](../user/installation.md)). No bundles
+yet.
 
 ## Approach
 

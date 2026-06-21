@@ -11,6 +11,7 @@
 
 pub mod http;
 pub mod rclone;
+pub mod rclone_download;
 pub mod rclone_path;
 pub mod staging;
 

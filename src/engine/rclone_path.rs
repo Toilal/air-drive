@@ -8,10 +8,10 @@
 //!    version; refused if the binary isn't executable or version doesn't parse.
 //! 3. **Cache** — `$XDG_CACHE_HOME/air-drive/bin/rclone`, populated by a prior
 //!    auto-download. Same version probe.
-//! 4. **Download** — when `--no-download-rclone` is *not* set, fetch the release ZIP
-//!    from `downloads.rclone.org`, verify its SHA-256, extract, and cache. This step
-//!    is the subject of a follow-up (see [`download_to_cache`]) and currently returns
-//!    a placeholder error so users get a clear "install rclone manually" message.
+//! 4. **Download** — when `--no-download-rclone` is *not* set, fetch the pinned release
+//!    ZIP from `downloads.rclone.org`, verify its SHA-256 against the version's
+//!    `SHA256SUMS` manifest, extract the binary, and cache it. See
+//!    [`crate::engine::rclone_download`].
 //!
 //! Each successful step yields an [`RcloneBinary`] carrying the source (so
 //! `air-drive status --json` can report it) and the version string (informational for
@@ -159,21 +159,12 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Fetch the latest rclone release archive from `downloads.rclone.org`, verify its
-/// SHA-256, extract the binary, and place it in `cache_dir/bin/rclone`.
-///
-/// **Status — placeholder for follow-up**: implementing zip extraction + signature
-/// verification cleanly is its own work item (it adds `sha2` and a zip crate as deps,
-/// plus a platform-aware download URL builder). For now the function returns an error
-/// instructing the user to install rclone manually. The contract surface is fixed so
-/// the real implementation can land without touching call sites.
-async fn download_to_cache(_cache_dir: &Path) -> Result<PathBuf> {
-    Err(Error::Rclone {
-        stderr: "automatic rclone download is not yet implemented. \
-                 Install rclone manually from https://rclone.org/install, \
-                 or set [rclone].path in config.toml."
-            .into(),
-    })
+/// Fetch the pinned rclone release archive from `downloads.rclone.org`, verify its
+/// SHA-256 against the version's `SHA256SUMS` manifest, extract the binary, and place it
+/// in `cache_dir/bin/rclone`. Implementation lives in
+/// [`crate::engine::rclone_download`].
+async fn download_to_cache(cache_dir: &Path) -> Result<PathBuf> {
+    crate::engine::rclone_download::download_to_cache(cache_dir).await
 }
 
 #[cfg(test)]
