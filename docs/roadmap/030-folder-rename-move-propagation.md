@@ -62,6 +62,10 @@ Once folders are `sync_item` rows (020):
   unit-tested incl. a lookalike-prefix `docs2` guard).
 - [x] Coverage of a non-trivial multi-level subtree
   (`items::tests::rename_subtree_rewrites_dir_and_all_descendants`).
+- [x] e2e scenarios written (`tests/e2e/rclone_drive.rs` `e7`/`e8`): folder
+  renamed locally moves on Drive (same id), folder renamed on Drive moves
+  locally — driven by a **continuously-running** daemon (`common::DaemonProcess`,
+  ported from the integration harness). **Not yet executed** (no token).
 
 ## Implementation notes
 
@@ -72,5 +76,5 @@ dispatcher routes folder ops to it: `RenameRemote` (kind=Dir) after
 detects a folder rename/move when a known `remote_id`'s path changed. Echo of a
 local `fs::rename` converges harmlessly (a redundant no-op move at worst).
 
-Remaining before deletion of this entry: e2e verification against real Drive
-(`RcloneEngine::move_remote` for a folder is exercised only there).
+Remaining before deletion of this entry: run the e2e suite (`e7`/`e8`) against
+real Drive to confirm `RcloneEngine::move_remote` for a folder end-to-end.

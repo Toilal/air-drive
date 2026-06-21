@@ -23,6 +23,9 @@
 //! - **empty-directory propagation** — an empty local dir is created on Drive, an
 //!   empty Drive folder is materialised locally, and a nested file lands inside a
 //!   directory created on the fly (folder support, #1).
+//! - **folder rename/move** — a directory renamed locally moves on Drive, and a
+//!   directory renamed on Drive moves locally, via a *continuously-running* daemon
+//!   ([`common::DaemonProcess`]) rather than the one-shot initial-sync (#7).
 //!
 //! See `tests/e2e/README.md` for the setup procedure (GCP project, OAuth Desktop
 //! credentials, token acquisition).
@@ -301,6 +304,133 @@ async fn e6_initial_sync_uploads_nested_file_into_created_dir() {
         "md5 round-trip mismatch for docs/spec.txt"
     );
 
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// E7 — a folder renamed locally moves on Drive (continuous daemon, #7)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires real Drive credentials — run via `cargo test -- --ignored`"]
+async fn e7_local_dir_rename_propagates_via_rclone() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    fx.populate_local("docs/spec.txt", b"folder-rename e2e");
+    seed_account_and_mapping(&fx);
+
+    // Continuous daemon: initial-sync uploads docs/ + spec.txt, then it keeps
+    // running so the subsequent local rename is handled as a live event.
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    // Wait for the initial sync to create `docs` on Drive, then capture its id.
+    let appeared = common::wait_until(Duration::from_secs(90), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.is_folder() && c.name == "docs"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        appeared,
+        "initial sync should create `docs` on Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+    let docs_id = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .find(|c| c.is_folder() && c.name == "docs")
+        .expect("docs folder")
+        .id;
+
+    // Rename the directory locally.
+    std::fs::rename(fx.local_dir.join("docs"), fx.local_dir.join("documents")).unwrap();
+
+    // The SAME Drive folder id must now be named `documents` — a move, not a
+    // re-create (which would mint a new id).
+    let renamed = common::wait_until(Duration::from_secs(90), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| {
+                cs.iter()
+                    .any(|c| c.is_folder() && c.name == "documents" && c.id == docs_id)
+            })
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        renamed,
+        "local folder rename should move the same Drive folder; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// E8 — a folder renamed on Drive moves locally (continuous daemon, #7)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires real Drive credentials — run via `cargo test -- --ignored`"]
+async fn e8_remote_dir_rename_propagates_locally() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    fx.populate_local("docs/spec.txt", b"remote-folder-rename e2e");
+    seed_account_and_mapping(&fx);
+
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    // Wait for initial sync to create `docs` on Drive, capture its id.
+    let appeared = common::wait_until(Duration::from_secs(90), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.is_folder() && c.name == "docs"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        appeared,
+        "initial sync should create `docs` on Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+    let docs_id = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .find(|c| c.is_folder() && c.name == "docs")
+        .expect("docs folder")
+        .id;
+
+    // Rename the folder on Drive (web-UI style) via the REST API.
+    fx.drive
+        .patch_json(
+            &format!("files/{docs_id}"),
+            &[],
+            &serde_json::json!({ "name": "documents" }),
+        )
+        .await
+        .expect("rename folder on Drive");
+
+    // The change poller must propagate the rename to the local tree: the child
+    // follows the folder, and the old path disappears.
+    let renamed = common::wait_until(Duration::from_secs(120), || async {
+        fx.local_dir.join("documents/spec.txt").is_file() && !fx.local_dir.join("docs").exists()
+    })
+    .await;
+    assert!(
+        renamed,
+        "remote folder rename should move the local dir; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    daemon.shutdown().await;
     fx.cleanup().await;
 }
 

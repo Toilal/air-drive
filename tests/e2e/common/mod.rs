@@ -33,7 +33,7 @@
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assert_cmd::cargo::CommandCargoExt;
 use tempfile::TempDir;
@@ -316,6 +316,78 @@ fn parse_rfc3339_secs(s: &str) -> Option<u64> {
     }
     let secs = days as u64 * 86400 + h * 3600 + mi * 60 + se;
     Some(secs)
+}
+
+/// Spawn-and-control wrapper around a continuously-running `air-drive start`
+/// against the real Drive, for e2e tests that need the daemon alive (continuous
+/// sync — folder renames/moves). `kill_on_drop` ensures a panicking test never
+/// leaks a runaway daemon. Mirrors the integration suite's `DaemonProcess`.
+pub struct DaemonProcess {
+    child: tokio::process::Child,
+    pid: u32,
+}
+
+impl DaemonProcess {
+    /// Spawn `air-drive --config-dir <fx> start <extra_args...>` staying in the
+    /// continuous loop (`EXIT_AFTER_INITIAL_SYNC=0`, overriding the one-shot
+    /// default `air_drive_cmd` sets). Returns once the child is up; callers poll
+    /// the side effect they care about (a file/folder on Drive, a local path) via
+    /// [`wait_until`].
+    pub async fn spawn(fx: &E2eFixture, extra_args: &[&str]) -> Self {
+        let mut cmd: tokio::process::Command = fx.air_drive_cmd().into();
+        cmd.env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "0");
+        cmd.arg("start");
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn air-drive start");
+        let pid = child.id().expect("child pid");
+        // Let the process clear its bootstrap (Db::open + Lock::acquire).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Self { child, pid }
+    }
+
+    /// Best-effort liveness check. `None` while running; `Some(status)` once exited.
+    pub fn poll_alive(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
+    /// `SIGTERM`, wait up to 15 s for a clean drain, fall back to `SIGKILL`.
+    pub async fn shutdown(mut self) -> std::process::ExitStatus {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        let _ = kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM);
+        match tokio::time::timeout(Duration::from_secs(15), self.child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => panic!("daemon wait failed: {e}"),
+            Err(_) => {
+                let _ = self.child.start_kill();
+                self.child.wait().await.expect("wait after SIGKILL")
+            }
+        }
+    }
+}
+
+/// Poll `cond` every 500 ms until it returns `true` or `timeout` expires. Returns
+/// whether the condition was met. The poll cadence is deliberately gentle — these
+/// conditions hit the real Drive REST API, which is rate-limited.
+pub async fn wait_until<F, Fut>(timeout: Duration, mut cond: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if cond().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 #[cfg(test)]
