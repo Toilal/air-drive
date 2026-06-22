@@ -109,6 +109,12 @@ pub async fn enqueue(
     payload: Option<&str>,
     now: i64,
 ) -> Result<OpId> {
+    tracing::debug!(
+        op = ?op,
+        sync_item_id = sync_item_id.0,
+        payload = payload.unwrap_or("-"),
+        "enqueue op"
+    );
     let payload = payload.map(str::to_owned);
     conn.call(move |c| {
         c.execute(

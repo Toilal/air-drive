@@ -198,6 +198,14 @@ async fn execute(
         .await?
         .ok_or_else(|| Error::Mapping(format!("sync_item {} vanished", op.sync_item_id.0)))?;
 
+    tracing::debug!(
+        op_id = op.id.0,
+        op = ?op.op,
+        relative_path = %item.relative_path,
+        remote_id = item.remote_id.as_deref().unwrap_or("-"),
+        "execute op"
+    );
+
     match op.op {
         Operation::Upload => {
             let local = local_root.join(&item.relative_path);
