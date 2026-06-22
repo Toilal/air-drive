@@ -6,14 +6,16 @@
 
 #![forbid(unsafe_code)]
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode as StdExitCode;
 
 use clap::Parser;
 
 use air_drive::cli::{Cli, ExitCode, dispatch, fallback_exit_code};
-use air_drive::config::{Config, RcloneConfig};
+use air_drive::config::paths::Paths;
+use air_drive::config::{Config, DaemonConfig, RcloneConfig};
 use air_drive::engine::rclone_path;
-use air_drive::observability::init_tracing;
+use air_drive::observability::{LogOptions, init_tracing};
 
 fn main() -> StdExitCode {
     // Intercept `--version` / `-V` before clap so we can append the resolved
@@ -35,7 +37,22 @@ fn main() -> StdExitCode {
     }
 
     let cli = Cli::parse();
-    if let Err(e) = init_tracing(cli.verbose, cli.log_file.as_deref()) {
+
+    // Resolve the logger from config.toml (best-effort — a broken config is
+    // surfaced with a proper error later by `dispatch`, where it is loaded
+    // strictly). The CLI `--log-file` flag overrides `[daemon].log_file`.
+    let daemon_cfg = resolve_daemon_config(cli.config_dir.as_deref());
+    let config_log_file =
+        (!daemon_cfg.log_file.is_empty()).then(|| PathBuf::from(&daemon_cfg.log_file));
+    let log_file = cli.log_file.clone().or(config_log_file);
+    let log_opts = LogOptions {
+        verbose: cli.verbose,
+        log_file: log_file.as_deref(),
+        level: &daemon_cfg.log_level,
+        format: daemon_cfg.log_format,
+        color: daemon_cfg.log_color,
+    };
+    if let Err(e) = init_tracing(&log_opts) {
         eprintln!("failed to initialise tracing: {e}");
         return StdExitCode::from(ExitCode::GenericError as u8);
     }
@@ -60,6 +77,18 @@ fn main() -> StdExitCode {
         }
     });
     StdExitCode::from(code as u8)
+}
+
+/// Load `[daemon]` from `config.toml` to drive logger setup before the runtime
+/// starts. Best-effort: any failure (missing/broken config, undiscoverable
+/// paths) falls back to defaults so logging still comes up; `dispatch` loads
+/// the config strictly afterwards and reports real errors.
+fn resolve_daemon_config(config_dir: Option<&Path>) -> DaemonConfig {
+    Paths::discover(config_dir)
+        .ok()
+        .and_then(|paths| Config::load(&paths.config().join("config.toml")).ok())
+        .map(|cfg| cfg.daemon)
+        .unwrap_or_default()
 }
 
 /// Print the crate version + the resolved rclone binary's version when one

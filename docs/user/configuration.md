@@ -52,7 +52,10 @@ Display metadata for the mapped pair. The authoritative `remote_folder_id` and
 | ------------------------------ | ------ | ------- | ------------------------------------------------------------------------------- |
 | `remote_poll_interval_seconds` | int    | `30`    | How often the daemon polls Drive `changes.list`. Clamped to `[10, 60]` at startup. |
 | `safety_net_interval_seconds`  | int    | `300`   | Interval of the safety-net reconciliation cycle. Must stay ≥ 5 min (constitution principle II). |
-| `log_file`                     | string | `""`    | Optional log file path; empty disables file logging (stderr only).               |
+| `log_file`                     | string | `""`    | Optional log file path; empty disables file logging (stderr only). The `--log-file` flag overrides this. |
+| `log_level`                    | string | `""`    | Persistent log level. Empty = unset (the `-v` flags / `RUST_LOG` / the built-in `warn` default apply). A bare level (`"info"`, `"debug"`, …) applies to the `air_drive` target; a value containing `=` is a full `RUST_LOG`-style directive (e.g. `"air_drive=debug,rclone=warn"`). **Precedence**: `RUST_LOG` > `-v` flags > `log_level` > `warn`. |
+| `log_format`                   | string | `"text"` | Log record format: `text` (human-readable) or `json` (structured, one object per record — for journald/Loki). Applies to both stderr and the log file. |
+| `log_color`                    | string | `"auto"` | ANSI colour policy for the stderr layer: `auto` (colour only on a terminal), `always`, or `never`. The file layer is always colour-free. |
 
 ### `[rclone]` — engine binary override
 
@@ -119,6 +122,9 @@ auto_create_remote_root = false
 remote_poll_interval_seconds = 30
 safety_net_interval_seconds = 300
 log_file = ""
+log_level = "air_drive=debug,rclone=warn"
+log_format = "text"
+log_color = "auto"
 
 [rclone]
 path = "/usr/local/bin/rclone"

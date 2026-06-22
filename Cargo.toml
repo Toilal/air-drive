@@ -67,7 +67,7 @@ clap = { version = "4", features = ["derive"] }
 # Errors and tracing
 thiserror = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 
 # Process-level file lock for single-instance enforcement via BSD flock(2) semantics
 # (per open-file-description, so two opens of the same file in the same process compete

@@ -49,6 +49,21 @@ const FIELD_DESCRIPTIONS: &[(&str, &str, &str)] = &[
         "Optional log file path; empty string disables file logging (stderr only).",
     ),
     (
+        "daemon",
+        "log_level",
+        "Persistent log level; empty string means unset (use -v / RUST_LOG / warn default). A bare level applies to air_drive; a value with `=` is a full RUST_LOG-style directive. RUST_LOG and -v take precedence.",
+    ),
+    (
+        "daemon",
+        "log_format",
+        "Log record format: text (default) or json.",
+    ),
+    (
+        "daemon",
+        "log_color",
+        "ANSI colour policy for stderr logs: auto (default), always, or never. The file layer is always colour-free.",
+    ),
+    (
         "watch",
         "ignore_patterns",
         "Glob patterns matched against the file name. Files whose name matches any pattern are never synced.",
