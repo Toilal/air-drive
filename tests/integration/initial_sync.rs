@@ -453,6 +453,130 @@ async fn us1_6_initial_sync_persists_parent_dirs_of_nested_files() {
 }
 
 // ---------------------------------------------------------------------------
+// ignore patterns are honoured by the initial pass, on BOTH sides — an ignored
+// remote file is not downloaded, an ignored local file is not uploaded, and
+// neither gets a sync_item row. (Before the bulk reconciliation this was a gap:
+// the initial pass applied no ignore filtering at all.)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us1_7_initial_sync_honours_ignore_patterns() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    // Remote: one real file + one ignored file (`.DS_Store` is a default pattern).
+    mock.insert_file(Some(&root_id), "remote-keep.txt", b"keep me");
+    mock.insert_file(Some(&root_id), ".DS_Store", b"os junk");
+
+    // Local: one real file + one ignored file (a vim swap matches `.*.swp`).
+    let fx = fs_fixture();
+    fx.populate_local(&[
+        ("local-keep.txt", b"local keeper" as &[u8]),
+        (".local-keep.txt.swp", b"vim swap junk"),
+    ]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_account(&fx, "alice@example.com");
+    seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
+
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start");
+    let (code, _stdout, stderr) = run(cmd);
+    assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
+
+    // Ignored remote file is NOT downloaded; the real one is.
+    assert!(
+        !fx.local_dir.join(".DS_Store").exists(),
+        "ignored remote .DS_Store should not be downloaded"
+    );
+    assert!(
+        fx.local_dir.join("remote-keep.txt").exists(),
+        "non-ignored remote file should be downloaded"
+    );
+
+    // Ignored local file is NOT uploaded; the real one is.
+    let descendants = mock.state.lock().unwrap().descendants(&root_id);
+    let names: Vec<String> = descendants.iter().map(|(p, _)| p.clone()).collect();
+    assert!(
+        !names.contains(&".local-keep.txt.swp".to_string()),
+        "ignored local swap file should not be uploaded; got {names:?}"
+    );
+    assert!(
+        names.contains(&"local-keep.txt".to_string()),
+        "non-ignored local file should be uploaded; got {names:?}"
+    );
+
+    // Neither ignored file gets a sync_item row.
+    with_state_db(&fx, |conn| {
+        for rel in [".DS_Store", ".local-keep.txt.swp"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_item WHERE relative_path = ?1",
+                    rusqlite::params![rel],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "ignored file {rel} must have no sync_item row");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Re-running the initial pass after a lost cursor is idempotent. Mirrors the
+// real "it synced files but says No sync state yet" report: a first pass that
+// copied files but never persisted the change cursor must re-run cleanly, not
+// trip the sync_item (mapping_id, relative_path) unique constraint.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us1_8_initial_sync_rerun_is_idempotent_after_lost_cursor() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    mock.insert_file(Some(&root_id), "r1.txt", b"remote one");
+    let docs = mock.insert_folder(Some(&root_id), "docs");
+    mock.insert_file(Some(&docs), "r2.txt", b"remote two");
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("l1.txt", b"local one" as &[u8])]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_account(&fx, "alice@example.com");
+    seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
+
+    // First start: full initial pass converges and writes the cursor.
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start");
+    let (code, _o, stderr) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "first initial-sync should converge; stderr=\n{stderr}"
+    );
+
+    // Simulate the interruption: drop the cursor so the next start re-runs the
+    // initial pass while the sync_item rows from the first pass still exist.
+    with_state_db(&fx, |conn| {
+        conn.execute("DELETE FROM drive_change_cursor", []).unwrap();
+    });
+
+    // Second start: must re-run the initial pass without error and re-establish
+    // the cursor (no unique-constraint violation on the pre-existing rows).
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start");
+    let (code, _o, stderr) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "re-run after a lost cursor must be idempotent; stderr=\n{stderr}"
+    );
+
+    with_state_db(&fx, |conn| {
+        let cursor_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM drive_change_cursor", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cursor_rows, 1, "cursor must be re-established after re-run");
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Pre-seeding helpers (sync rusqlite — simpler than spinning up the async wrapper).
 // ---------------------------------------------------------------------------
 

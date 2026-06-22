@@ -72,11 +72,24 @@ event-driven loops above are.
 
 ## Pluggable engine
 
+<a id="sync-engine"></a>
 Application code never touches `rclone`'s CLI directly; it depends on the
 `SyncEngine` trait in `engine/mod.rs`. `RcloneEngine` drives the `rclone` binary
 via `tokio::process::Command`. A native Rust engine (`NativeEngine`) is the
 long-term goal and must be substitutable without touching the rest of the
 daemon. See [`../../CLAUDE.md`](../../CLAUDE.md) §IV.
+
+The trait's steady-state surface is **per-file** (`upload`, `download`,
+`move_remote`, `delete_remote`, …) — that granularity is what the event-driven
+loop is built on, and the continuous loop uses nothing else. The one exception is
+**bootstrap**: `bulk_download` / `bulk_upload` move a pre-computed *set* of files
+in a single batched transfer, used only by the [initial
+reconciliation](sync-model.md#initial-reconciliation) where O(files) process
+spawns would dominate. `RcloneEngine` realises them as one `rclone copy
+--files-from` per direction (with `--transfers`/`--checkers` parallelism and
+`--stats` progress streamed line-by-line to the `rclone` tracing target, visible
+at `info`); `HttpEngine` as a per-file loop. The reconciler still owns all policy
+— the engine only moves the exact paths it is handed.
 
 ## State
 

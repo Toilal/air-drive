@@ -1,13 +1,24 @@
 //! Pluggable sync engine: the [`SyncEngine`] trait and its initial implementation.
 //!
 //! The trait is the only door the reconciler walks through when it needs to talk to the
-//! remote side. It exposes **atomic, per-file** operations (upload, download, move,
-//! delete) — never a high-level "bisync the tree" call. That granularity is what gives
-//! us the event-driven loop required by constitution principle II and the freedom to
-//! swap the rclone-backed implementation for a native Rust engine later (constitution
-//! principle IV).
+//! remote side. Its **steady-state** surface is deliberately **atomic and per-file**
+//! (upload, download, move, delete): that granularity is what gives us the event-driven
+//! loop required by constitution principle II and the freedom to swap the rclone-backed
+//! implementation for a native Rust engine later (constitution principle IV). The
+//! continuous-sync loop MUST only ever use these per-file operations.
 //!
-//! The MVP ships exactly one implementation: [`rclone::RcloneEngine`].
+//! The single exception is **bootstrap**: [`SyncEngine::bulk_download`] and
+//! [`SyncEngine::bulk_upload`] move a pre-computed *set* of files in one batched
+//! transfer, used **only** by the one-shot initial reconciliation
+//! ([`crate::reconcile::initial`]) where O(files) per-file process spawns are the
+//! dominant cost. They are not a "bisync the tree" call — the reconciler still owns all
+//! policy (what to sync, ignore patterns, conflicts, native-Doc shortcuts, state
+//! population); the engine only moves the bytes for the exact relative paths it is
+//! handed. `RcloneEngine` implements them as a single `rclone copy --files-from`;
+//! `HttpEngine` as a per-file loop over the same list.
+//!
+//! Implementations: [`rclone::RcloneEngine`] (production) and [`http::HttpEngine`] (the
+//! in-process engine the integration suite drives).
 
 pub mod http;
 pub mod rclone;
@@ -73,6 +84,35 @@ pub enum Op {
     },
 }
 
+/// One file to fetch in a bootstrap [`SyncEngine::bulk_download`]. Carries both
+/// the Drive id (so an id-addressed engine like [`http::HttpEngine`] can fetch
+/// directly) and the path relative to the remote root (so a path-addressed
+/// engine like [`rclone::RcloneEngine`] can list it in a `--files-from`); each
+/// engine uses whichever field fits. Resolved by the reconciler from its remote
+/// walk, so no engine has to re-walk the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkDownload {
+    /// Drive file ID.
+    pub remote_id: String,
+    /// Destination path relative to the local root (and source path relative to
+    /// the remote root — they mirror each other).
+    pub rel_path: String,
+}
+
+/// One file to push in a bootstrap [`SyncEngine::bulk_upload`]. Carries the
+/// already-resolved Drive parent-folder id + name (for an id-addressed engine)
+/// and the path relative to the local root (for a path-addressed engine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkUpload {
+    /// Source path relative to the local root (mirrors the remote path).
+    pub rel_path: String,
+    /// Drive ID of the destination parent folder (already created by the
+    /// reconciler's directory pass).
+    pub remote_parent_id: String,
+    /// File name on Drive (last segment of `rel_path`).
+    pub name: String,
+}
+
 /// The pluggable sync engine. Implementations live under [`mod@self`].
 #[async_trait::async_trait]
 pub trait SyncEngine: Send + Sync + 'static {
@@ -110,4 +150,32 @@ pub trait SyncEngine: Send + Sync + 'static {
     /// Remove a remote folder (Drive trash) by id. Callers MUST delete a
     /// folder's children first; this only removes the (expected-empty) folder.
     async fn remove_dir_remote(&self, remote_id: &str) -> Result<()>;
+
+    /// **Bootstrap-only.** Download `items` into `local_root`, recreating
+    /// intermediate directories as needed. `remote_root_id` scopes the remote
+    /// for path-addressed engines. Native Google Docs are excluded by the caller
+    /// and MUST NOT be fetched here. An empty `items` is a no-op.
+    ///
+    /// This is a batched accelerator for [`crate::reconcile::initial`], never
+    /// used by the continuous loop. Implementations SHOULD move the whole set in
+    /// as few round-trips as possible and report progress to the `rclone`/engine
+    /// tracing target.
+    async fn bulk_download(
+        &self,
+        items: &[BulkDownload],
+        remote_root_id: &str,
+        local_root: &Path,
+    ) -> Result<()>;
+
+    /// **Bootstrap-only.** Upload `items` (paths relative to `local_root`) under
+    /// `remote_root_id`, creating intermediate remote folders as needed. An empty
+    /// `items` is a no-op.
+    ///
+    /// Counterpart of [`Self::bulk_download`]; same constraints and intent.
+    async fn bulk_upload(
+        &self,
+        items: &[BulkUpload],
+        local_root: &Path,
+        remote_root_id: &str,
+    ) -> Result<()>;
 }

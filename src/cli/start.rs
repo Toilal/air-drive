@@ -116,6 +116,7 @@ pub async fn run(
             mapping_row.id,
             &local_root,
             &remote_root_id,
+            &cfg.watch.ignore_patterns,
         )
         .await?;
     }
@@ -157,6 +158,10 @@ pub async fn run(
     };
 
     let cancel = CancellationToken::new();
+    tracing::info!(
+        poll_interval_secs = poll_interval,
+        "entering continuous sync loop"
+    );
     crate::daemon::run(ctx, cancel).await?;
 
     Ok(ExitCode::Ok)

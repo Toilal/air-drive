@@ -21,6 +21,7 @@ the current status.
 
 | #   | Feature                                                       | Priority  | Issue |
 | --- | ------------------------------------------------------------ | --------- | ----- |
+| 060 | [Bulk initial reconciliation](060-bulk-initial-sync.md)     | 🟡 medium | —     |
 | 070 | [Interactive setup wizard](070-interactive-setup.md)        | —         | —     |
 | 080 | [Surface recovered state](080-surface-recovered-state.md)   | —         | —     |
 | 090 | [Symlink handling](090-symlinks.md)                         | ⚪ low     | [#2](https://github.com/Toilal/air-drive/issues/2) |

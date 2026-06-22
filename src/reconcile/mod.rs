@@ -19,13 +19,15 @@ pub mod continuous;
 pub mod fingerprint;
 pub mod shortcut;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
+use globset::GlobSet;
+
 use crate::drive::http::DriveHttp;
 use crate::drive::metadata;
-use crate::engine::SyncEngine;
+use crate::engine::{BulkDownload, BulkUpload, SyncEngine};
 use crate::error::{Error, Result};
 use crate::state::Db;
 use crate::state::cursor;
@@ -70,7 +72,10 @@ pub async fn initial(
     mapping_id: MappingId,
     local_root: &Path,
     remote_root_id: &str,
+    ignore_patterns: &[String],
 ) -> Result<()> {
+    let ignore = crate::watch::build_ignore_matcher(ignore_patterns)?;
+
     let local_entries = walk_local(local_root)?;
     let remote_entries = walk_remote(http, remote_root_id).await?;
 
@@ -98,7 +103,9 @@ pub async fn initial(
     //    sorts before them). Each dir is created on whichever side lacks it and
     //    persisted as a kind='dir' sync_item — this is how *empty* folders
     //    propagate, and it gives folder rename/move (#7) a row to anchor to.
-    let mut dir_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    //    Doing it up front also means every file's remote parent folder exists
+    //    (and its id is cached) before the bulk transfer runs.
+    let mut dir_paths: BTreeSet<String> = BTreeSet::new();
     for e in local_entries.iter().filter(|e| e.is_dir) {
         dir_paths.insert(e.relative_path.clone());
     }
@@ -126,105 +133,179 @@ pub async fn initial(
         record_synced_dir(db, mapping_id, dir, &remote_id).await?;
     }
 
-    // 1. Local-only files → upload (creating remote parent folders as needed).
-    //    Files matching by md5 (in_both with equal fingerprint) are recorded but NOT
-    //    re-uploaded.
+    // 1. Native Google Docs (no md5, `vnd.google-apps.*`) → write a local
+    //    shortcut pointer + a `skipped` row, never download bytes that don't
+    //    exist (issue #3). Done before the bulk lists are built so these are
+    //    excluded from the download set; the on-disk `.gdoc` is excluded from
+    //    the upload set below. Idempotent on re-run.
+    for remote in &remote_files {
+        if remote.md5.is_some() {
+            continue;
+        }
+        if shortcut::is_native(&remote.mime_type) {
+            let rel = shortcut::relative_path(&remote.relative_path, &remote.mime_type);
+            if items::get_by_relative_path(db.connection(), mapping_id, &rel)
+                .await?
+                .is_none()
+            {
+                let body = shortcut::content(&remote.mime_type, &remote.id);
+                shortcut::write(&local_root.join(&rel), &body).await?;
+                record_skipped_shortcut(db, mapping_id, &rel, &remote.id).await?;
+            }
+        } else {
+            tracing::info!(
+                relative_path = %remote.relative_path,
+                "skipping remote file with no md5"
+            );
+        }
+    }
+
+    // 2. Classify leaf files into the three buckets the bulk transfer / state
+    //    pass act on. The engine is a dumb pipe: it only ever moves the exact
+    //    paths we put in these lists, so every special case (ignore patterns,
+    //    native Docs, conflicts) is resolved *here*, by inclusion/exclusion.
+    let mut downloads: Vec<BulkDownload> = Vec::new();
+    let mut uploads: Vec<BulkUpload> = Vec::new();
+    // remote-only files we'll record as synced once the download succeeds.
+    let mut remote_only: Vec<(&str, &str, i64, String)> = Vec::new();
+
+    // Remote-only → download (skip ignored, skip md5-less which §1 handled).
+    for remote in &remote_files {
+        if local_paths.contains(remote.relative_path.as_str()) {
+            continue; // both-sides — handled below
+        }
+        if is_ignored(&ignore, &remote.relative_path) {
+            continue;
+        }
+        let Some(md5) = remote.md5.clone() else {
+            continue; // native Doc / md5-less: handled in §1
+        };
+        downloads.push(BulkDownload {
+            remote_id: remote.id.clone(),
+            rel_path: remote.relative_path.clone(),
+        });
+        remote_only.push((&remote.relative_path, &remote.id, remote.size, md5));
+    }
+
+    // Local-only → upload (skip ignored, skip shortcut pointers we wrote).
     for local in &local_files {
-        // A shortcut the daemon wrote for a native Google Doc (issue #3) lives on
-        // disk as a pointer file with a `skipped` row — never upload it to Drive.
+        if remote_by_path.contains_key(local.relative_path.as_str()) {
+            continue; // both-sides — handled below
+        }
+        if is_ignored(&ignore, &local.relative_path) {
+            continue;
+        }
         if let Some(it) =
             items::get_by_relative_path(db.connection(), mapping_id, &local.relative_path).await?
         {
             if it.state == ItemState::Skipped {
-                continue;
+                continue; // a `.gdoc` shortcut — never upload it back
             }
+        }
+        let (parent_rel, name) = split_parent(&local.relative_path);
+        let parent_id = remote_folder_ids
+            .get(parent_rel)
+            .cloned()
+            .unwrap_or_else(|| remote_root_id.to_owned());
+        uploads.push(BulkUpload {
+            rel_path: local.relative_path.clone(),
+            remote_parent_id: parent_id,
+            name: name.to_owned(),
+        });
+    }
+
+    // Both-sides files: md5-equal → record synced (no transfer); md5-differ →
+    // defer to the continuous-sync conflict handler (unchanged semantics).
+    for local in &local_files {
+        let Some(remote) = remote_by_path.get(local.relative_path.as_str()) else {
+            continue;
+        };
+        if is_ignored(&ignore, &local.relative_path) {
+            continue;
         }
         let local_path = local_root.join(&local.relative_path);
         let (size, md5) = fingerprint::compute_local(&local_path).await?;
-        let (parent_rel, file_name) = split_parent(&local.relative_path);
-        match remote_by_path.get(local.relative_path.as_str()) {
-            Some(remote) => {
-                if remote.md5.as_deref() == Some(&md5) && remote.size == size {
-                    record_synced_item(
-                        db,
-                        mapping_id,
-                        &local.relative_path,
-                        Some(remote.id.clone()),
-                        size,
-                        md5,
-                    )
-                    .await?;
-                } else {
-                    tracing::warn!(
-                        relative_path = %local.relative_path,
-                        local_md5 = %md5,
-                        remote_md5 = ?remote.md5,
-                        "fingerprint mismatch on both-sides file — deferring to continuous-sync conflict handler"
-                    );
-                }
-            }
-            None => {
-                let parent_id =
-                    ensure_remote_folder(http, &mut remote_folder_ids, remote_root_id, parent_rel)
-                        .await?;
-                let uploaded = engine.upload(&local_path, &parent_id, file_name).await?;
-                record_synced_item(
-                    db,
-                    mapping_id,
-                    &local.relative_path,
-                    Some(uploaded.id),
-                    size,
-                    md5,
-                )
-                .await?;
-            }
+        if remote.md5.as_deref() == Some(&md5) && remote.size == size {
+            record_synced_item(
+                db,
+                mapping_id,
+                &local.relative_path,
+                Some(remote.id.clone()),
+                size,
+                md5,
+            )
+            .await?;
+        } else {
+            tracing::warn!(
+                relative_path = %local.relative_path,
+                local_md5 = %md5,
+                remote_md5 = ?remote.md5,
+                "fingerprint mismatch on both-sides file — deferring to continuous-sync conflict handler"
+            );
         }
     }
 
-    // 2. Remote-only files → download.
-    for remote in &remote_files {
-        if local_paths.contains(remote.relative_path.as_str()) {
-            continue;
-        }
-        let Some(md5) = remote.md5.clone() else {
-            if shortcut::is_native(&remote.mime_type) {
-                // Native Google Doc → write a local shortcut pointer instead of
-                // downloading bytes that don't exist (issue #3). Idempotent: a
-                // pre-existing row (e.g. a re-run) is left untouched.
-                let rel = shortcut::relative_path(&remote.relative_path, &remote.mime_type);
-                if items::get_by_relative_path(db.connection(), mapping_id, &rel)
-                    .await?
-                    .is_none()
-                {
-                    let body = shortcut::content(&remote.mime_type, &remote.id);
-                    shortcut::write(&local_root.join(&rel), &body).await?;
-                    record_skipped_shortcut(db, mapping_id, &rel, &remote.id).await?;
-                }
-            } else {
-                tracing::info!(
-                    relative_path = %remote.relative_path,
-                    "skipping remote file with no md5"
-                );
-            }
-            continue;
-        };
-        let local_path = local_root.join(&remote.relative_path);
-        if let Some(parent) = local_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        engine.download(&remote.id, &local_path, local_root).await?;
-        record_synced_item(
-            db,
-            mapping_id,
-            &remote.relative_path,
-            Some(remote.id.clone()),
-            remote.size,
-            md5,
-        )
+    // 3. Bulk transfer. One batched call per direction (see `SyncEngine`):
+    //    `RcloneEngine` runs a single `rclone copy --files-from` with live
+    //    progress; `HttpEngine` loops per file. The list contents already
+    //    encode every policy decision from §1–§2.
+    tracing::info!(
+        downloads = downloads.len(),
+        uploads = uploads.len(),
+        dirs = dir_paths.len(),
+        "initial reconciliation: starting bulk transfer"
+    );
+    engine
+        .bulk_download(&downloads, remote_root_id, local_root)
         .await?;
+    engine
+        .bulk_upload(&uploads, local_root, remote_root_id)
+        .await?;
+
+    // 4. Record state for the transferred files. Remote-only files take the
+    //    md5/size/id from the pre-transfer remote walk (the download reproduced
+    //    that content locally).
+    for (rel, id, size, md5) in remote_only {
+        record_synced_item(db, mapping_id, rel, Some(id.to_owned()), size, md5).await?;
     }
 
-    // 3. Persist the changes-cursor baseline AFTER convergence so the continuous loop
+    // Local-only files only get their Drive id after the upload, so re-walk the
+    // remote once (O(dirs) `files.list`, not O(files) spawns) and match by path.
+    if !uploads.is_empty() {
+        let after = walk_remote(http, remote_root_id).await?;
+        let after_by_path: HashMap<&str, &RemoteEntry> = after
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|r| (r.relative_path.as_str(), r))
+            .collect();
+        for up in &uploads {
+            match after_by_path.get(up.rel_path.as_str()) {
+                Some(r) => match &r.md5 {
+                    Some(md5) => {
+                        record_synced_item(
+                            db,
+                            mapping_id,
+                            &up.rel_path,
+                            Some(r.id.clone()),
+                            r.size,
+                            md5.clone(),
+                        )
+                        .await?;
+                    }
+                    None => tracing::warn!(
+                        relative_path = %up.rel_path,
+                        "uploaded file has no md5 in post-sync remote walk — leaving for continuous sync"
+                    ),
+                },
+                None => tracing::warn!(
+                    relative_path = %up.rel_path,
+                    "uploaded file missing from post-sync remote walk — leaving for continuous sync"
+                ),
+            }
+        }
+    }
+
+    // 5. Persist the changes-cursor baseline AFTER convergence so the continuous loop
     //    doesn't replay events the initial pass already covered.
     let cursor_body = http.get_json("changes/startPageToken", &[]).await?;
     let token = cursor_body
@@ -233,8 +314,17 @@ pub async fn initial(
         .ok_or_else(|| Error::Drive("missing startPageToken in response".into()))?
         .to_owned();
     cursor::set(db.connection(), mapping_id, &token, unix_now()).await?;
+    tracing::info!("initial reconciliation complete");
 
     Ok(())
+}
+
+/// Match a relative path against the watcher's ignore globs — by **file name**
+/// only, mirroring [`crate::watch`]'s steady-state behaviour so a pattern means
+/// the same thing during bootstrap and during continuous sync.
+fn is_ignored(matcher: &GlobSet, rel_path: &str) -> bool {
+    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+    matcher.is_match(name)
 }
 
 /// Walk the local tree, returning every file and directory beneath `root` (excluding
@@ -320,50 +410,6 @@ async fn walk_remote(http: &DriveHttp, root_id: &str) -> Result<Vec<RemoteEntry>
     Ok(out)
 }
 
-/// Walk `parent_rel` segment by segment, creating Drive folders as needed. Returns
-/// the Drive folder ID corresponding to `parent_rel`. Caches results so a deep tree
-/// does at most O(depth) folder creations.
-async fn ensure_remote_folder(
-    http: &DriveHttp,
-    folder_ids_by_path: &mut HashMap<String, String>,
-    root_id: &str,
-    rel: &str,
-) -> Result<String> {
-    if rel.is_empty() {
-        return Ok(root_id.to_owned());
-    }
-    if let Some(id) = folder_ids_by_path.get(rel) {
-        return Ok(id.clone());
-    }
-    let segments: Vec<&str> = rel.split('/').collect();
-    let mut current_parent_id = root_id.to_owned();
-    let mut current_path = String::new();
-    for seg in segments {
-        if !current_path.is_empty() {
-            current_path.push('/');
-        }
-        current_path.push_str(seg);
-        if let Some(id) = folder_ids_by_path.get(&current_path) {
-            current_parent_id = id.clone();
-            continue;
-        }
-        let existing = metadata::list_children(http, &current_parent_id)
-            .await?
-            .into_iter()
-            .find(|c| c.is_folder() && c.name == seg);
-        let id = match existing {
-            Some(c) => c.id,
-            None => {
-                let created = metadata::create_folder(http, &current_parent_id, seg).await?;
-                created.id
-            }
-        };
-        folder_ids_by_path.insert(current_path.clone(), id.clone());
-        current_parent_id = id;
-    }
-    Ok(current_parent_id)
-}
-
 /// Split a relative path into `(parent_dir, file_name)`. `"a/b/c.txt"` → `("a/b", "c.txt")`,
 /// `"top.txt"` → `("", "top.txt")`.
 fn split_parent(rel: &str) -> (&str, &str) {
@@ -379,6 +425,15 @@ async fn record_synced_dir(
     relative_path: &str,
     remote_id: &str,
 ) -> Result<()> {
+    // Idempotent: an interrupted initial pass (cursor not yet written) may have
+    // already recorded this row. On re-run, leave the existing one in place
+    // rather than hitting the (mapping_id, relative_path) unique constraint.
+    if items::get_by_relative_path(db.connection(), mapping_id, relative_path)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
     items::insert(
         db.connection(),
         &NewSyncItem {
@@ -432,6 +487,13 @@ async fn record_synced_item(
     size: i64,
     md5: String,
 ) -> Result<()> {
+    // Idempotent on re-run of an interrupted initial pass — see `record_synced_dir`.
+    if items::get_by_relative_path(db.connection(), mapping_id, relative_path)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
     items::insert(
         db.connection(),
         &NewSyncItem {
@@ -488,5 +550,25 @@ mod tests {
         let entries = walk_local(tmp.path()).unwrap();
         let paths: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
         assert!(paths.contains(&"a/b/c/leaf.txt"), "got {paths:?}");
+    }
+
+    #[test]
+    fn is_ignored_matches_on_file_name_at_any_depth() {
+        let patterns: Vec<String> = ["*.swp", ".DS_Store"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let m = crate::watch::build_ignore_matcher(&patterns).unwrap();
+
+        // Matches by base name, regardless of directory depth.
+        assert!(is_ignored(&m, ".DS_Store"));
+        assert!(is_ignored(&m, "docs/notes/.DS_Store"));
+        assert!(is_ignored(&m, "deep/dir/scratch.swp"));
+
+        // Non-ignored files are kept.
+        assert!(!is_ignored(&m, "keep.txt"));
+        assert!(!is_ignored(&m, "docs/keep.txt"));
+        // The pattern matches the name, not a path segment.
+        assert!(!is_ignored(&m, "swp/keep.txt"));
     }
 }
