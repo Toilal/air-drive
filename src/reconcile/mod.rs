@@ -31,9 +31,10 @@ use crate::engine::{BulkDownload, BulkUpload, SyncEngine};
 use crate::error::{Error, Result};
 use crate::state::Db;
 use crate::state::cursor;
-use crate::state::items::{self, ItemKind, ItemState, NewSyncItem};
+use crate::state::items::{self, ItemKind, ItemState, NewSyncItem, SyncItem};
 use crate::state::mapping::MappingId;
 use crate::state::unix_now;
+use crate::watch::WatchEvent;
 
 /// One file under the local watched root, as discovered by [`walk_local`].
 #[derive(Debug, Clone)]
@@ -325,6 +326,127 @@ pub async fn initial(
 fn is_ignored(matcher: &GlobSet, rel_path: &str) -> bool {
     let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
     matcher.is_match(name)
+}
+
+/// Replay local changes that occurred while the daemon was stopped: diff the
+/// local tree against the last-synced fingerprints in `sync_item` and feed the
+/// differences through [`continuous::apply_local`] as synthesized watch events.
+/// The change cursor is intentionally **not** touched — remote-side offline
+/// changes are recovered by the change poller from the persisted cursor.
+///
+/// A local modify/delete is only propagated when the **remote** is still at the
+/// last-synced fingerprint (verified with one `files.get`). If both sides
+/// drifted while down it is left to the change poller's conflict handler, so the
+/// scan can never overwrite a concurrent remote edit.
+///
+/// Runs on every daemon start. On the very first start it is a near-no-op: the
+/// initial reconciliation already converged every path. Returns the number of
+/// replayed events (for logging).
+pub async fn startup_local_scan(
+    http: &DriveHttp,
+    db: &Db,
+    mapping_id: MappingId,
+    local_root: &Path,
+    ignore_patterns: &[String],
+) -> Result<usize> {
+    let ignore = crate::watch::build_ignore_matcher(ignore_patterns)?;
+    let local_entries = walk_local(local_root)?;
+    let local_file_paths: HashSet<&str> = local_entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .map(|e| e.relative_path.as_str())
+        .collect();
+
+    let mut replayed = 0usize;
+
+    // New or modified local entries → Created / Modified events.
+    for entry in &local_entries {
+        if is_ignored(&ignore, &entry.relative_path) {
+            continue;
+        }
+        let abs = local_root.join(&entry.relative_path);
+        let existing =
+            items::get_by_relative_path(db.connection(), mapping_id, &entry.relative_path).await?;
+
+        if entry.is_dir {
+            // A directory we don't track yet → propagate its creation (empty
+            // dirs included). A known dir needs nothing.
+            if existing.is_none() {
+                continuous::apply_local(WatchEvent::Created(abs), db, mapping_id, local_root)
+                    .await?;
+                replayed += 1;
+            }
+            continue;
+        }
+
+        match existing {
+            // Shortcut pointer for a native Google Doc — never re-upload it.
+            Some(item) if item.state == ItemState::Skipped => {}
+            // Tracked file: replay only if its content actually drifted from the
+            // last-synced fingerprint, AND the remote hasn't drifted too (else
+            // it's a both-sides conflict — leave it to the poller).
+            Some(item) => {
+                let (size, md5) = fingerprint::compute_local(&abs).await?;
+                let changed_locally =
+                    item.md5.as_deref() != Some(md5.as_str()) || item.size != Some(size);
+                if changed_locally && remote_matches_synced(http, &item).await {
+                    continuous::apply_local(WatchEvent::Modified(abs), db, mapping_id, local_root)
+                        .await?;
+                    replayed += 1;
+                } else if changed_locally {
+                    tracing::info!(
+                        relative_path = %item.relative_path,
+                        "startup scan: local edit + remote drift — deferring to conflict handler"
+                    );
+                }
+            }
+            // Brand-new local file created while the daemon was down.
+            None => {
+                continuous::apply_local(WatchEvent::Created(abs), db, mapping_id, local_root)
+                    .await?;
+                replayed += 1;
+            }
+        }
+    }
+
+    // Files we had synced that vanished locally while down → Deleted events,
+    // unless the remote moved on (delete-vs-edit conflict → defer to the poller).
+    for item in items::list_for_mapping(db.connection(), mapping_id).await? {
+        if item.kind != ItemKind::File
+            || item.state == ItemState::Skipped
+            || item.trashed_at.is_some()
+            || local_file_paths.contains(item.relative_path.as_str())
+            || is_ignored(&ignore, &item.relative_path)
+        {
+            continue;
+        }
+        if !remote_matches_synced(http, &item).await {
+            tracing::info!(
+                relative_path = %item.relative_path,
+                "startup scan: local delete + remote drift — deferring to conflict handler"
+            );
+            continue;
+        }
+        let abs = local_root.join(&item.relative_path);
+        continuous::apply_local(WatchEvent::Deleted(abs), db, mapping_id, local_root).await?;
+        replayed += 1;
+    }
+
+    Ok(replayed)
+}
+
+/// Is `item`'s remote file still at the last-synced md5 (the remote side hasn't
+/// changed since we last synced)? A missing/404 remote, a fetch error, or a
+/// missing id all return `false` — meaning "can't confirm the remote is
+/// unchanged", so the caller defers to the change poller instead of acting.
+async fn remote_matches_synced(http: &DriveHttp, item: &SyncItem) -> bool {
+    let Some(remote_id) = item.remote_id.as_deref() else {
+        return false;
+    };
+    match metadata::get_file_raw(http, remote_id, "md5Checksum").await {
+        Ok(v) => v.get("md5Checksum").and_then(|x| x.as_str()) == item.md5.as_deref(),
+        Err(_) => false,
+    }
 }
 
 /// Walk the local tree, returning every file and directory beneath `root` (excluding

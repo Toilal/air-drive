@@ -96,6 +96,24 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     let (_watcher_keepalive, watcher_rx) = watch::Watcher::start(&ctx.local_root, ignore_matcher)?;
     let raw_forwarder = forward_channel(watcher_rx, raw_tx, cancel.clone());
 
+    // 1b. Startup catch-up: replay any local change made while the daemon was
+    //     stopped (inotify wasn't running then). The watcher is already live, so
+    //     no concurrent change is lost; remote-side offline changes are recovered
+    //     separately by the change poller from the persisted cursor.
+    match crate::reconcile::startup_local_scan(
+        &ctx.http,
+        &ctx.db,
+        ctx.mapping_id,
+        &ctx.local_root,
+        &ctx.watch_ignore_patterns,
+    )
+    .await
+    {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(replayed = n, "startup scan: replayed offline local changes"),
+        Err(e) => tracing::warn!(error = %e, "startup local scan failed; continuing"),
+    }
+
     // 2. Debounce.
     let debounce_task = tokio::spawn(debounce::run(
         raw_rx,
