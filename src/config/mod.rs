@@ -68,6 +68,30 @@ pub struct MappingConfig {
     pub auto_create_remote_root: bool,
 }
 
+/// Log record format for the tracing subscriber.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable single-line text (the default).
+    #[default]
+    Text,
+    /// Structured JSON, one object per record — for log aggregators.
+    Json,
+}
+
+/// ANSI colour policy for the stderr log layer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogColor {
+    /// Colour only when stderr is a terminal (the default).
+    #[default]
+    Auto,
+    /// Always emit ANSI colour codes.
+    Always,
+    /// Never emit ANSI colour codes.
+    Never,
+}
+
 /// Daemon runtime tuning.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -80,6 +104,18 @@ pub struct DaemonConfig {
     pub safety_net_interval_seconds: u64,
     /// Optional log file path; empty string disables file logging (stderr only).
     pub log_file: String,
+    /// Persistent log level. Empty string means "unset" (fall back to the
+    /// verbosity flag / `RUST_LOG` / the built-in `warn` default). A bare level
+    /// (`"info"`, `"debug"`, …) applies to the `air_drive` target; a value
+    /// containing `=` is treated as a full `RUST_LOG`-style filter directive
+    /// (e.g. `"air_drive=debug,rclone=warn"`). `RUST_LOG` and the `-v` flags
+    /// take precedence over this key.
+    pub log_level: String,
+    /// Log record format: `text` (default) or `json`.
+    pub log_format: LogFormat,
+    /// ANSI colour policy for the stderr layer: `auto` (default), `always`, or
+    /// `never`. The file layer is always colour-free.
+    pub log_color: LogColor,
 }
 
 impl Default for DaemonConfig {
@@ -88,6 +124,9 @@ impl Default for DaemonConfig {
             remote_poll_interval_seconds: 30,
             safety_net_interval_seconds: 300,
             log_file: String::new(),
+            log_level: String::new(),
+            log_format: LogFormat::default(),
+            log_color: LogColor::default(),
         }
     }
 }
@@ -208,6 +247,42 @@ mod tests {
         assert_eq!(cfg.daemon.remote_poll_interval_seconds, 30);
         assert_eq!(cfg.daemon.safety_net_interval_seconds, 300);
         assert!(cfg.oauth.client_id.is_none());
+    }
+
+    #[test]
+    fn log_defaults_are_unset_text_auto() {
+        let cfg = DaemonConfig::default();
+        assert_eq!(cfg.log_level, "");
+        assert_eq!(cfg.log_format, LogFormat::Text);
+        assert_eq!(cfg.log_color, LogColor::Auto);
+    }
+
+    #[test]
+    fn log_keys_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.daemon.log_level = "air_drive=debug,rclone=warn".into();
+        cfg.daemon.log_format = LogFormat::Json;
+        cfg.daemon.log_color = LogColor::Never;
+
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+
+        assert_eq!(loaded.daemon.log_level, "air_drive=debug,rclone=warn");
+        assert_eq!(loaded.daemon.log_format, LogFormat::Json);
+        assert_eq!(loaded.daemon.log_color, LogColor::Never);
+    }
+
+    #[test]
+    fn unknown_log_format_variant_rejected() {
+        let toml = r#"
+            [daemon]
+            log_format = "yaml"
+        "#;
+        let res: std::result::Result<Config, _> = toml::from_str(toml);
+        assert!(res.is_err());
     }
 
     #[test]
