@@ -659,6 +659,85 @@ async fn e10_native_google_doc_becomes_local_shortcut() {
 }
 
 // ---------------------------------------------------------------------------
+// E11 — a folder created on Drive with a file inside it syncs down to local,
+// live (continuous daemon). Guards the remote change feed end-to-end, including
+// the parent-chain path resolution that the root-alias bug broke.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires real Drive credentials — run via `cargo test -- --ignored`"]
+async fn e11_remote_new_folder_with_file_syncs_locally() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    // A sentinel local file forces the initial sync to run and the change-cursor
+    // baseline to be persisted; once it lands on Drive we know the poller is live
+    // and any subsequent remote change will be after the baseline token.
+    fx.populate_local("ready.txt", b"sentinel");
+    seed_account_and_mapping(&fx);
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    let baseline = common::wait_until(Duration::from_secs(90), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "ready.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        baseline,
+        "initial sync should upload the sentinel; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Web-UI style: create a brand-new folder on Drive and drop a file inside it.
+    let content = b"remote nested payload";
+    let newdir_id = metadata::create_folder(&fx.drive, &fx.run_folder_id, "newdir")
+        .await
+        .expect("create newdir on Drive")
+        .id;
+    fx.drive
+        .upload_multipart(
+            &serde_json::json!({
+                "name": "note.txt",
+                "parents": [newdir_id],
+                "mimeType": "text/plain",
+            }),
+            "text/plain",
+            content,
+        )
+        .await
+        .expect("upload note.txt into newdir on Drive");
+
+    // The change feed must materialise the folder AND the nested file locally.
+    let synced = common::wait_until(Duration::from_secs(120), || async {
+        fx.local_dir.join("newdir/note.txt").is_file()
+    })
+    .await;
+    assert!(
+        synced,
+        "remote new folder + file should sync locally; alive? {:?}",
+        daemon.poll_alive()
+    );
+    assert_eq!(
+        std::fs::read(fx.local_dir.join("newdir/note.txt")).unwrap(),
+        content,
+        "downloaded content mismatch for newdir/note.txt"
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// NOTE: the symmetric local→remote case (a folder created locally with a file
+// inside, propagated up by the live daemon) is intentionally NOT covered here
+// yet — it surfaced a separate watcher gap (a file created inside a brand-new
+// local directory is missed because the recursive inotify watch on the new
+// subdir isn't registered before the file event fires). Tracked as follow-up;
+// the test will be reinstated alongside that fix.
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
