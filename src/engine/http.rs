@@ -17,7 +17,7 @@ use serde_json::json;
 
 use crate::drive::http::DriveHttp;
 use crate::engine::staging;
-use crate::engine::{RemoteFile, SyncEngine};
+use crate::engine::{BulkDownload, BulkUpload, RemoteFile, SyncEngine};
 use crate::error::{Error, Result};
 
 /// In-process HTTP engine.
@@ -177,6 +177,36 @@ impl SyncEngine for HttpEngine {
         // A Drive `files.delete` by id trashes a folder just like a file.
         let path = format!("files/{remote_id}");
         self.http.delete(&path).await
+    }
+
+    async fn bulk_download(
+        &self,
+        items: &[BulkDownload],
+        _remote_root_id: &str,
+        local_root: &Path,
+    ) -> Result<()> {
+        // No batch endpoint: realise the bulk intent as a per-file loop over the
+        // pre-resolved ids. Production parallelism lives in `RcloneEngine`; this
+        // engine only backs the (small, deterministic) integration fixtures.
+        for item in items {
+            let dest = local_root.join(&item.rel_path);
+            self.download(&item.remote_id, &dest, local_root).await?;
+        }
+        Ok(())
+    }
+
+    async fn bulk_upload(
+        &self,
+        items: &[BulkUpload],
+        local_root: &Path,
+        _remote_root_id: &str,
+    ) -> Result<()> {
+        for item in items {
+            let src = local_root.join(&item.rel_path);
+            self.upload(&src, &item.remote_parent_id, &item.name)
+                .await?;
+        }
+        Ok(())
     }
 }
 

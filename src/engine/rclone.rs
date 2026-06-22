@@ -32,12 +32,13 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::drive::auth::{RcloneToken, TokenProvider};
 use crate::drive::http::DriveHttp;
 use crate::engine::staging;
-use crate::engine::{RemoteFile, SyncEngine};
+use crate::engine::{BulkDownload, BulkUpload, RemoteFile, SyncEngine};
 use crate::error::{Error, Result};
 
 /// Where the `rclone` binary the engine drives came from. Surfaced via
@@ -180,6 +181,68 @@ impl RcloneEngine {
             return Err(Error::Rclone { stderr });
         }
         Ok(out.stdout)
+    }
+
+    /// Spawn `cmd` for a long-running bulk transfer and **stream** its stderr to
+    /// the `rclone` tracing target line by line (rclone writes `--stats` /
+    /// `-v` progress to stderr), so the operator sees live progress at `info`
+    /// instead of a silent multi-minute pause. The last few stderr lines are
+    /// retained and folded into [`Error::Rclone`] on a non-zero exit.
+    async fn run_streaming(&self, mut cmd: Command) -> Result<()> {
+        let mut child = cmd.spawn().map_err(|e| Error::Rclone {
+            stderr: format!("spawn rclone: {e}"),
+        })?;
+        // Keep a small tail of stderr so a failure carries actionable context
+        // even though we've already streamed the lines out to the log.
+        let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        if let Some(stderr) = child.stderr.take() {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Some(line) = lines.next_line().await.map_err(Error::Io)? {
+                tracing::info!(target: "rclone", "{line}");
+                tail.push_back(line);
+                if tail.len() > 20 {
+                    tail.pop_front();
+                }
+            }
+        }
+        let status = child.wait().await.map_err(|e| Error::Rclone {
+            stderr: format!("wait rclone: {e}"),
+        })?;
+        if !status.success() {
+            return Err(Error::Rclone {
+                stderr: tail.into_iter().collect::<Vec<_>>().join("\n"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Write a newline-delimited `--files-from` list under the local staging dir
+    /// and return its path. The caller is responsible for discarding it.
+    fn write_files_from(local_root: &Path, rel_paths: &[&str]) -> Result<PathBuf> {
+        let path = staging::stage_path(local_root, "bulk-files-from.txt")?;
+        let body = rel_paths.join("\n");
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    /// Append the bootstrap-bulk flags shared by both directions: the
+    /// `--files-from` set, bounded parallelism, and streamed one-line progress
+    /// stats. The `copy` subcommand and the src/dst operands are added by the
+    /// caller *before* this — rclone parses the first positional as the
+    /// subcommand, so `copy` MUST come first. Empty directories are propagated by
+    /// the reconciler's directory pass, not here, so `--create-empty-src-dirs`
+    /// is intentionally omitted (it would risk duplicate Drive folders).
+    fn add_bulk_flags(cmd: &mut Command, files_from: &Path) {
+        cmd.arg("--files-from")
+            .arg(files_from)
+            .arg("--transfers")
+            .arg("8")
+            .arg("--checkers")
+            .arg("16")
+            .arg("--stats")
+            .arg("1s")
+            .arg("--stats-one-line")
+            .arg("-v");
     }
 }
 
@@ -408,6 +471,65 @@ impl SyncEngine for RcloneEngine {
         // `rclone delete` removes files, not a directory itself; a Drive
         // `files.delete` by id trashes the (expected-empty) folder directly.
         self.http.delete(&format!("files/{remote_id}")).await
+    }
+
+    async fn bulk_download(
+        &self,
+        items: &[BulkDownload],
+        remote_root_id: &str,
+        local_root: &Path,
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // rclone addresses Drive by path, so it needs only the relative paths;
+        // the Drive ids carried by `items` are for the id-addressed HTTP engine.
+        let rel_paths: Vec<&str> = items.iter().map(|i| i.rel_path.as_str()).collect();
+        let files_from = Self::write_files_from(local_root, &rel_paths)?;
+        let mut cmd = self.base_command().await?;
+        // `copy` MUST be the first positional (rclone reads it as the
+        // subcommand), then source → destination.
+        cmd.arg("copy")
+            .arg(format!("{REMOTE_NAME}:"))
+            .arg(local_root)
+            .arg("--drive-root-folder-id")
+            .arg(remote_root_id)
+            // Native Google Docs have no downloadable bytes; the reconciler
+            // handles them as shortcuts and leaves them out of `items`. Skip
+            // them defensively so a stray entry can't trigger an export.
+            .arg("--drive-skip-gdocs");
+        Self::add_bulk_flags(&mut cmd, &files_from);
+        let result = self.run_streaming(cmd).await;
+        let _ = staging::discard(&files_from);
+        result
+    }
+
+    async fn bulk_upload(
+        &self,
+        items: &[BulkUpload],
+        local_root: &Path,
+        remote_root_id: &str,
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // rclone recreates the remote folder tree itself from the relative
+        // paths, so the per-file `remote_parent_id` is unused here (it serves
+        // the id-addressed HTTP engine).
+        let rel_paths: Vec<&str> = items.iter().map(|i| i.rel_path.as_str()).collect();
+        let files_from = Self::write_files_from(local_root, &rel_paths)?;
+        let mut cmd = self.base_command().await?;
+        // `copy` MUST be the first positional (rclone reads it as the
+        // subcommand), then source → destination.
+        cmd.arg("copy")
+            .arg(local_root)
+            .arg(format!("{REMOTE_NAME}:"))
+            .arg("--drive-root-folder-id")
+            .arg(remote_root_id);
+        Self::add_bulk_flags(&mut cmd, &files_from);
+        let result = self.run_streaming(cmd).await;
+        let _ = staging::discard(&files_from);
+        result
     }
 }
 

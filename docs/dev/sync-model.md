@@ -95,13 +95,28 @@ interactive terminal the daemon confirms first; see
 [CLI reference](../user/cli.md#start)). It:
 
 1. Walks the local tree and the remote tree once.
-2. Classifies every leaf as `local-only`, `remote-only`, or `both`.
-3. Dispatches `upload` / `download` until the queue drains.
-4. Captures a Drive `changes.getStartPageToken` baseline, so the continuous loop
-   only sees events that happened *after* the initial pass.
+2. Reconciles directories on both sides (so empty folders propagate and every
+   remote parent folder exists, with its id cached, before any file moves).
+3. Writes a local shortcut + `skipped` row for each native Google Doc.
+4. Classifies every leaf as `local-only`, `remote-only`, or `both`, dropping any
+   whose **name** matches a `[watch].ignore_patterns` glob — the same filter the
+   continuous watcher applies, so a pattern means the same thing during bootstrap
+   and steady state.
+5. Moves the `local-only` and `remote-only` sets in **two batched transfers** via
+   [`SyncEngine::bulk_upload`] / `bulk_download` (see
+   [architecture](architecture.md#sync-engine)), then re-walks the remote once to
+   record the uploaded files' Drive ids in `sync_item`.
+6. Captures a Drive `changes.getStartPageToken` baseline **last**, so the
+   continuous loop only sees events that happened *after* the initial pass.
 
 For `both` files, an md5 match is recorded directly in `sync_item`; a mismatch
-is deferred to the continuous-sync conflict path.
+is deferred to the continuous-sync conflict path. The reconciler owns every
+policy decision here — the engine only moves the exact paths it is handed, so the
+bulk transfer can never sync an ignored, conflicting, or native-Doc file.
+
+Persisting the cursor last means an interrupted initial pass leaves files copied
+but no cursor; the next `start` simply re-runs the (idempotent) pass — md5-equal
+files are recorded without re-transfer.
 
 ## Conflicts
 
