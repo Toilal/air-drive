@@ -48,6 +48,10 @@ pub struct DaemonContext {
     pub remote_root_id: String,
     /// Poll interval for `changes.list`, clamped to `[10, 60]` upstream.
     pub remote_poll_interval: Duration,
+    /// Run the offline-local catch-up scan at startup. Set on a restart (a prior
+    /// session converged the tree); `false` on the first sync, where the initial
+    /// reconciliation already covered everything.
+    pub catch_up_offline_local: bool,
     /// XDG runtime dir — where the control socket (`control.sock`) lives.
     pub runtime_dir: PathBuf,
     /// File-name glob patterns the watcher ignores (from `[watch].ignore_patterns`).
@@ -99,19 +103,23 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     // 1b. Startup catch-up: replay any local change made while the daemon was
     //     stopped (inotify wasn't running then). The watcher is already live, so
     //     no concurrent change is lost; remote-side offline changes are recovered
-    //     separately by the change poller from the persisted cursor.
-    match crate::reconcile::startup_local_scan(
-        &ctx.http,
-        &ctx.db,
-        ctx.mapping_id,
-        &ctx.local_root,
-        &ctx.watch_ignore_patterns,
-    )
-    .await
-    {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(replayed = n, "startup scan: replayed offline local changes"),
-        Err(e) => tracing::warn!(error = %e, "startup local scan failed; continuing"),
+    //     separately by the change poller from the persisted cursor. Skipped on
+    //     the first sync, where the initial reconciliation already converged
+    //     everything (running it there would just race that fresh state).
+    if ctx.catch_up_offline_local {
+        match crate::reconcile::startup_local_scan(
+            &ctx.http,
+            &ctx.db,
+            ctx.mapping_id,
+            &ctx.local_root,
+            &ctx.watch_ignore_patterns,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(replayed = n, "startup scan: replayed offline local changes"),
+            Err(e) => tracing::warn!(error = %e, "startup local scan failed; continuing"),
+        }
     }
 
     // 2. Debounce.

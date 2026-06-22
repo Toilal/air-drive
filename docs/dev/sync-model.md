@@ -145,8 +145,12 @@ made while it was stopped is recovered at the next start, from both sides:
   against `sync_item` (the last-synced fingerprints) and feeds the differences —
   new/modified/deleted files — through `apply_local` as synthesized watch events.
   It reuses the continuous pipeline's three-way conflict + echo handling and does
-  **not** touch the change cursor. It runs on every start; on the first start it
-  is a near-no-op (the initial reconciliation already converged everything).
+  **not** touch the change cursor. It runs on every **restart** (when a change
+  cursor already exists); it is skipped on the first sync, where the initial
+  reconciliation has just converged everything. A local modify/delete is only
+  replayed when the remote is still at the last-synced fingerprint (one
+  `files.get`); if both sides drifted while down it is deferred to the change
+  poller's conflict handler, so the scan never overwrites a concurrent edit.
 
 ## Safety net
 
