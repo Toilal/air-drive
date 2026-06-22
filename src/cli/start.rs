@@ -22,14 +22,26 @@ use crate::state::cursor;
 use crate::state::mapping::FolderMapping;
 use crate::state::{Db, accounts, mapping};
 
+/// Env marker set on the detached child so it runs the daemon in the foreground
+/// instead of detaching again (which would recurse).
+const DETACHED_CHILD_ENV: &str = "AIR_DRIVE_DETACHED_CHILD";
+
 /// Run the `start` subcommand. Honours the `--remote-poll-interval` override.
 pub async fn run(
     config_dir_override: Option<&Path>,
     cfg: &Config,
     remote_poll_interval: Option<u64>,
     no_download_rclone: bool,
+    detached: bool,
 ) -> Result<ExitCode> {
     let paths = runtime::resolve_paths(config_dir_override)?;
+
+    // 0. `--detached`: re-spawn ourselves in the background and return. The
+    //    child carries a marker env var so it skips this branch and runs the
+    //    daemon in the foreground (of its own detached session).
+    if detached && std::env::var_os(DETACHED_CHILD_ENV).is_none() {
+        return spawn_detached(paths.config());
+    }
 
     // 1. Acquire the single-instance lock. On contention, exit 6.
     let _lock = match Lock::acquire(paths.config()) {
@@ -164,6 +176,54 @@ pub async fn run(
     );
     crate::daemon::run(ctx, cancel).await?;
 
+    Ok(ExitCode::Ok)
+}
+
+/// Re-spawn this executable as a background daemon: same `start` invocation,
+/// stdout/stderr redirected to `<config-dir>/daemon.log`, placed in its own
+/// process group so it survives the launching shell (nohup-style). The child
+/// carries [`DETACHED_CHILD_ENV`] so it runs the daemon in the foreground rather
+/// than detaching again. For a supervised always-on service prefer the systemd
+/// unit; this is a convenience for ad-hoc background runs.
+fn spawn_detached(config_dir: &Path) -> Result<ExitCode> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = std::env::current_exe()
+        .map_err(|e| Error::Config(format!("cannot locate current executable: {e}")))?;
+    // Forward the original arguments verbatim; the marker env (not arg parsing)
+    // is what stops the child from re-detaching, so a combined flag like `-vd`
+    // can't cause a respawn loop.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+
+    let log_path = config_dir.join("daemon.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| {
+            Error::Config(format!(
+                "cannot open daemon log {}: {e}",
+                log_path.display()
+            ))
+        })?;
+    let log_err = log.try_clone()?;
+
+    let child = std::process::Command::new(&exe)
+        .args(&args)
+        .env(DETACHED_CHILD_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err))
+        .process_group(0)
+        .spawn()
+        .map_err(|e| Error::Config(format!("failed to spawn detached daemon: {e}")))?;
+
+    println!(
+        "air-drive daemon detached (pid {}); logs: {}",
+        child.id(),
+        log_path.display()
+    );
+    println!("Stop it with `air-drive stop`.");
     Ok(ExitCode::Ok)
 }
 
