@@ -22,6 +22,7 @@ pub mod shortcut;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use globset::GlobSet;
 
@@ -35,6 +36,10 @@ use crate::state::items::{self, ItemKind, ItemState, NewSyncItem, SyncItem};
 use crate::state::mapping::MappingId;
 use crate::state::unix_now;
 use crate::watch::WatchEvent;
+
+/// How many times to retry the targeted lookup of an uploaded file the
+/// post-sync remote walk didn't see yet (Drive eventual consistency).
+const AFTER_WALK_RETRIES: u32 = 4;
 
 /// One file under the local watched root, as discovered by [`walk_local`].
 #[derive(Debug, Clone)]
@@ -272,6 +277,14 @@ pub async fn initial(
 
     // Local-only files only get their Drive id after the upload, so re-walk the
     // remote once (O(dirs) `files.list`, not O(files) spawns) and match by path.
+    //
+    // A just-uploaded file can be briefly invisible to `files.list` (Drive
+    // eventual consistency); for any still-missing path we retry a targeted
+    // lookup under its (already-known) parent folder. Recording it reliably HERE
+    // matters: an unrecorded upload reappears as a phantom "new" file in the
+    // change feed later and cascades into bugs — e.g. a folder rename downloading
+    // the phantom into the new path and then failing the dir rename with
+    // ENOTEMPTY (issue #19).
     if !uploads.is_empty() {
         let after = walk_remote(http, remote_root_id).await?;
         let after_by_path: HashMap<&str, &RemoteEntry> = after
@@ -279,30 +292,50 @@ pub async fn initial(
             .filter(|e| !e.is_dir)
             .map(|r| (r.relative_path.as_str(), r))
             .collect();
+        let mut pending: Vec<&BulkUpload> = Vec::new();
         for up in &uploads {
-            match after_by_path.get(up.rel_path.as_str()) {
-                Some(r) => match &r.md5 {
-                    Some(md5) => {
-                        record_synced_item(
-                            db,
-                            mapping_id,
-                            &up.rel_path,
-                            Some(r.id.clone()),
-                            r.size,
-                            md5.clone(),
-                        )
-                        .await?;
-                    }
-                    None => tracing::warn!(
-                        relative_path = %up.rel_path,
-                        "uploaded file has no md5 in post-sync remote walk — leaving for continuous sync"
-                    ),
-                },
-                None => tracing::warn!(
-                    relative_path = %up.rel_path,
-                    "uploaded file missing from post-sync remote walk — leaving for continuous sync"
-                ),
+            match after_by_path
+                .get(up.rel_path.as_str())
+                .and_then(|r| r.md5.as_ref().map(|m| (*r, m.clone())))
+            {
+                Some((r, md5)) => {
+                    record_synced_item(
+                        db,
+                        mapping_id,
+                        &up.rel_path,
+                        Some(r.id.clone()),
+                        r.size,
+                        md5,
+                    )
+                    .await?;
+                }
+                None => pending.push(up),
             }
+        }
+        // Retry the stragglers with a targeted parent listing, backing off to let
+        // Drive's index catch up.
+        for attempt in 0..AFTER_WALK_RETRIES {
+            if pending.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(400 * u64::from(attempt + 1))).await;
+            let mut still = Vec::new();
+            for up in pending {
+                match lookup_uploaded(http, &up.remote_parent_id, &up.name).await {
+                    Some((id, size, md5)) => {
+                        record_synced_item(db, mapping_id, &up.rel_path, Some(id), size, md5)
+                            .await?;
+                    }
+                    None => still.push(up),
+                }
+            }
+            pending = still;
+        }
+        for up in pending {
+            tracing::warn!(
+                relative_path = %up.rel_path,
+                "uploaded file still not visible after retries — leaving for continuous sync"
+            );
         }
     }
 
@@ -530,6 +563,23 @@ async fn walk_remote(http: &DriveHttp, root_id: &str) -> Result<Vec<RemoteEntry>
     }
     out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(out)
+}
+
+/// Look up a just-uploaded file directly under its (known) Drive parent folder,
+/// returning `(id, size, md5)` when it is present with an md5. Used to record an
+/// upload the post-sync remote walk missed because of Drive eventual
+/// consistency. Any error / absence yields `None` (the caller retries or warns).
+async fn lookup_uploaded(
+    http: &DriveHttp,
+    parent_id: &str,
+    name: &str,
+) -> Option<(String, i64, String)> {
+    let children = metadata::list_children(http, parent_id).await.ok()?;
+    let child = children
+        .into_iter()
+        .find(|c| !c.is_folder() && c.name == name)?;
+    let md5 = child.md5?;
+    Some((child.id, child.size.unwrap_or(0), md5))
 }
 
 /// Split a relative path into `(parent_dir, file_name)`. `"a/b/c.txt"` → `("a/b", "c.txt")`,
