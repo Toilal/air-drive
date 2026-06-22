@@ -339,6 +339,11 @@ impl DaemonProcess {
     pub async fn spawn(fx: &E2eFixture, extra_args: &[&str]) -> Self {
         let mut cmd: tokio::process::Command = fx.air_drive_cmd().into();
         cmd.env("AIR_DRIVE_TEST_EXIT_AFTER_INITIAL_SYNC", "0");
+        // Run the continuous daemon at debug so its stderr (inherited → captured
+        // in the CI job log) shows the full enqueue→execute op trace. This is how
+        // we diagnose the real-Drive timing/ordering flakes (#19, #21) that the
+        // mocked suite can't reproduce.
+        cmd.env("RUST_LOG", "air_drive=debug");
         cmd.arg("start");
         // A fresh config dir has an empty change cursor, so this first start runs
         // the initial reconciliation automatically (stdin is null → non-interactive,
