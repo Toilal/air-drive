@@ -17,6 +17,12 @@ Files whose **name** matches any `[watch].ignore_patterns` glob are dropped at
 this stage: no upload, no rename propagation, no delete propagation. See
 [configuration](../user/configuration.md#default-ignore-patterns).
 
+When a **new directory** is created, a file dropped into it can land before
+`notify` registers the recursive watch on the new subdir, so the file's own
+event is never delivered. To avoid silently missing it, `apply_local`'s
+`Created(dir)` handling **rescans the new directory** and enqueues every entry
+already inside it.
+
 ### Remote side — changes.list + pageToken
 
 The `drive::changes` module polls the Drive

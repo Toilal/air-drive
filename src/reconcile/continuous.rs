@@ -37,38 +37,19 @@ pub async fn apply_local(
     match event {
         WatchEvent::Created(p) | WatchEvent::Modified(p) => {
             if p.is_dir() {
-                // Directory: persist as kind='dir' and enqueue a remote create.
-                // Idempotent — if we already track it there's nothing to do (covers
-                // a Modified on a dir and the watcher echo of a CreateDirLocal we
-                // just performed).
                 let rel = strip_root(&p, local_root)?;
-                if items::get_by_relative_path(db.connection(), mapping_id, &rel)
-                    .await?
-                    .is_none()
-                {
-                    let new_id = items::insert(
-                        db.connection(),
-                        &NewSyncItem {
-                            mapping_id,
-                            relative_path: rel,
-                            kind: ItemKind::Dir,
-                            remote_id: None,
-                            size: None,
-                            md5: None,
-                            local_inode: None,
-                            last_synced_at: 0,
-                            state: ItemState::PendingLocal,
-                        },
-                    )
-                    .await?;
-                    ops::enqueue(
-                        db.connection(),
-                        new_id,
-                        Operation::CreateDirRemote,
-                        None,
-                        unix_now(),
-                    )
-                    .await?;
+                enqueue_local_dir(db, mapping_id, &rel).await?;
+                // inotify new-dir race: a file created inside a brand-new
+                // directory can land before `notify` registers the recursive
+                // watch on it, so the file's own Created event is never
+                // delivered. Walk the new dir and enqueue everything already
+                // inside it (parent-first) so nothing is silently dropped.
+                for (child_rel, is_dir) in walk_subtree(&p, local_root)? {
+                    if is_dir {
+                        enqueue_local_dir(db, mapping_id, &child_rel).await?;
+                    } else {
+                        enqueue_local_file(db, mapping_id, &child_rel).await?;
+                    }
                 }
                 return Ok(());
             }
@@ -78,52 +59,7 @@ pub async fn apply_local(
                 return Ok(());
             }
             let rel = strip_root(&p, local_root)?;
-            // No fingerprint computation here — the dispatcher will hash the file
-            // right before uploading. Doing it twice (once for echo suppression,
-            // once for persistence) burns CPU on big files; deferring the check
-            // means we may enqueue an upload that turns out to be a no-op, but
-            // the dispatcher detects that case via the same md5 comparison and
-            // skips the engine call. The fingerprint we persist is then
-            // guaranteed to match the bytes we actually pushed.
-            match items::get_by_relative_path(db.connection(), mapping_id, &rel).await? {
-                Some(item) if item.state == ItemState::Skipped => {
-                    // A shortcut file the daemon wrote for a native Google Doc
-                    // (issue #3). It lives only on disk as a pointer — never upload
-                    // it back to Drive, and ignore the watcher echo of our own write.
-                    return Ok(());
-                }
-                Some(item) => {
-                    ops::enqueue(
-                        db.connection(),
-                        item.id,
-                        Operation::Upload,
-                        None,
-                        unix_now(),
-                    )
-                    .await?;
-                }
-                None => {
-                    let new_id = items::insert(
-                        db.connection(),
-                        &NewSyncItem {
-                            mapping_id,
-                            relative_path: rel.clone(),
-                            kind: ItemKind::File,
-                            remote_id: None,
-                            // Leave size/md5 unset — the dispatcher populates them
-                            // after the upload completes.
-                            size: None,
-                            md5: None,
-                            local_inode: None,
-                            last_synced_at: 0,
-                            state: ItemState::PendingLocal,
-                        },
-                    )
-                    .await?;
-                    ops::enqueue(db.connection(), new_id, Operation::Upload, None, unix_now())
-                        .await?;
-                }
-            }
+            enqueue_local_file(db, mapping_id, &rel).await?;
         }
 
         WatchEvent::Deleted(p) => {
@@ -184,6 +120,114 @@ pub async fn apply_local(
                     .await;
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Persist a local directory as a `kind='dir'` item and enqueue its remote
+/// creation. Idempotent: a directory we already track is left untouched.
+async fn enqueue_local_dir(db: &Db, mapping_id: MappingId, rel: &str) -> Result<()> {
+    if items::get_by_relative_path(db.connection(), mapping_id, rel)
+        .await?
+        .is_none()
+    {
+        let new_id = items::insert(
+            db.connection(),
+            &NewSyncItem {
+                mapping_id,
+                relative_path: rel.to_owned(),
+                kind: ItemKind::Dir,
+                remote_id: None,
+                size: None,
+                md5: None,
+                local_inode: None,
+                last_synced_at: 0,
+                state: ItemState::PendingLocal,
+            },
+        )
+        .await?;
+        ops::enqueue(
+            db.connection(),
+            new_id,
+            Operation::CreateDirRemote,
+            None,
+            unix_now(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Enqueue an upload for a local file. A shortcut pointer (native Google Doc) is
+/// never uploaded back; a tracked file re-uploads on its existing row; an
+/// unknown file is recorded `pending_local` first. No fingerprinting here — the
+/// dispatcher hashes once just before uploading and skips a no-op.
+async fn enqueue_local_file(db: &Db, mapping_id: MappingId, rel: &str) -> Result<()> {
+    match items::get_by_relative_path(db.connection(), mapping_id, rel).await? {
+        Some(item) if item.state == ItemState::Skipped => {}
+        Some(item) => {
+            ops::enqueue(
+                db.connection(),
+                item.id,
+                Operation::Upload,
+                None,
+                unix_now(),
+            )
+            .await?;
+        }
+        None => {
+            let new_id = items::insert(
+                db.connection(),
+                &NewSyncItem {
+                    mapping_id,
+                    relative_path: rel.to_owned(),
+                    kind: ItemKind::File,
+                    remote_id: None,
+                    size: None,
+                    md5: None,
+                    local_inode: None,
+                    last_synced_at: 0,
+                    state: ItemState::PendingLocal,
+                },
+            )
+            .await?;
+            ops::enqueue(db.connection(), new_id, Operation::Upload, None, unix_now()).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Walk every descendant of `dir` (a path under `local_root`), returning
+/// `(relative_path, is_dir)` sorted parent-first so a directory is always
+/// enqueued before its children. Skips the staging directory; symlinks and
+/// special files are ignored, mirroring the watcher.
+fn walk_subtree(dir: &Path, local_root: &Path) -> Result<Vec<(String, bool)>> {
+    let mut out = Vec::new();
+    collect_subtree(dir, local_root, &mut out)?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn collect_subtree(dir: &Path, local_root: &Path, out: &mut Vec<(String, bool)>) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(Error::Io)?;
+        if entry.file_name().to_str() == Some(crate::engine::staging::PARTIAL_DIR) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        let rel = strip_root(&path, local_root)?;
+        if meta.is_dir() {
+            out.push((rel, true));
+            collect_subtree(&path, local_root, out)?;
+        } else if meta.is_file() {
+            out.push((rel, false));
         }
     }
     Ok(())
