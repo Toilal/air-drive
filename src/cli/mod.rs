@@ -15,6 +15,7 @@ pub mod runtime;
 pub mod setup;
 pub mod start;
 pub mod status;
+pub mod stop;
 pub mod unlink;
 
 use std::path::PathBuf;
@@ -81,11 +82,19 @@ pub enum Command {
         /// Override `daemon.remote_poll_interval_seconds` (clamped to 10..=60).
         #[arg(long, value_name = "SECONDS")]
         remote_poll_interval: Option<u64>,
+        /// Detach and run the daemon in the background, returning immediately.
+        /// Stdout/stderr are redirected to `<config-dir>/daemon.log`. For an
+        /// always-on, supervised service prefer the systemd unit
+        /// (`air-drive setup --install-service`). Stop it with `air-drive stop`.
+        #[arg(short = 'd', long)]
+        detached: bool,
     },
     /// Signal a running daemon to pause sync.
     Pause,
     /// Signal a paused daemon to resume sync.
     Resume,
+    /// Signal a running daemon to shut down gracefully.
+    Stop,
     /// Print the current daemon state.
     Status {
         /// Emit JSON matching `contracts/status.schema.json` instead of the
@@ -173,17 +182,20 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         } => map::run(cli.config_dir.as_deref(), &cfg, local_path, remote_folder).await,
         Command::Start {
             remote_poll_interval,
+            detached,
         } => {
             start::run(
                 cli.config_dir.as_deref(),
                 &cfg,
                 remote_poll_interval,
                 cli.no_download_rclone,
+                detached,
             )
             .await
         }
         Command::Pause => pause::run(cli.config_dir.as_deref()).await,
         Command::Resume => resume::run(cli.config_dir.as_deref()).await,
+        Command::Stop => stop::run(cli.config_dir.as_deref()).await,
         Command::Status { json } => status::run(cli.config_dir.as_deref(), json).await,
         Command::Unlink { yes } => unlink::run(cli.config_dir.as_deref(), yes).await,
         Command::Setup {
@@ -259,10 +271,23 @@ mod tests {
         match cli.command {
             Command::Start {
                 remote_poll_interval,
+                detached,
             } => {
                 assert_eq!(remote_poll_interval, Some(20));
+                assert!(!detached, "detached defaults to false");
             }
             _ => panic!("expected Start variant"),
+        }
+    }
+
+    #[test]
+    fn parses_start_detached_short_and_long() {
+        for flag in ["-d", "--detached"] {
+            let cli = Cli::try_parse_from(["air-drive", "start", flag]).expect("start parses");
+            match cli.command {
+                Command::Start { detached, .. } => assert!(detached, "{flag} should set detached"),
+                _ => panic!("expected Start variant"),
+            }
         }
     }
 

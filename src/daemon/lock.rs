@@ -75,6 +75,30 @@ impl Lock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// PID of the daemon currently holding the lock in `config_dir`, or `None`
+    /// when no live daemon holds it. Probes the lock non-blockingly: on
+    /// contention a live holder exists and its PID is read from the file; if the
+    /// probe acquires the lock, nobody is running. Unlike [`Self::acquire`] this
+    /// never rewrites the PID file — the acquired probe lock is released
+    /// immediately, leaving the on-disk PID untouched.
+    pub fn holder_pid(config_dir: &Path) -> Option<u32> {
+        let path = config_dir.join(LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .ok()?;
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            // We got the lock → no daemon is holding it. Dropping the guard
+            // releases it right away without touching the PID file.
+            Ok(_guard) => None,
+            // Contention → a live daemon holds the lock; report its PID.
+            Err((_file, _errno)) => read_pid_from(&path),
+        }
+    }
 }
 
 impl std::fmt::Debug for Lock {
@@ -132,6 +156,31 @@ mod tests {
             let _first = Lock::acquire(tmp.path()).unwrap();
         } // drop releases the kernel lock
         let _second = Lock::acquire(tmp.path()).expect("can re-acquire after release");
+    }
+
+    #[test]
+    fn holder_pid_reports_the_live_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _lock = Lock::acquire(tmp.path()).expect("acquire");
+        // A second probe in the same process contends (flock is per-open-fd),
+        // so it sees the live holder and reads back the recorded PID.
+        assert_eq!(Lock::holder_pid(tmp.path()), Some(std::process::id()));
+    }
+
+    #[test]
+    fn holder_pid_is_none_when_unlocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(Lock::holder_pid(tmp.path()), None);
+    }
+
+    #[test]
+    fn holder_pid_does_not_rewrite_the_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _lock = Lock::acquire(tmp.path()).expect("acquire");
+        let before = std::fs::read_to_string(tmp.path().join(LOCK_FILE)).unwrap();
+        let _ = Lock::holder_pid(tmp.path());
+        let after = std::fs::read_to_string(tmp.path().join(LOCK_FILE)).unwrap();
+        assert_eq!(before, after, "holder_pid must not touch the PID file");
     }
 
     #[test]

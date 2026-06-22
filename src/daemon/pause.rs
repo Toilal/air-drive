@@ -11,6 +11,10 @@
 //!   `resume`, `status-snapshot`. Each command is one line; the response is
 //!   one line (`ok\n`, `not running\n`, etc.). UNIX-only by design — the
 //!   project is Linux-first per constitution principle V.
+//!
+//! Graceful shutdown is NOT a control-socket command: `air-drive stop` signals
+//! the daemon directly (SIGTERM via the lock-file PID), reusing the same signal
+//! path as Ctrl-C / `systemctl stop`.
 
 use std::path::{Path, PathBuf};
 

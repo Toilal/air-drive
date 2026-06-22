@@ -53,10 +53,11 @@ air-drive map <LOCAL_PATH> <REMOTE_FOLDER>
 
 ### `start`
 
-Run the daemon in the foreground.
+Run the daemon in the foreground (the default), or in the background with
+`-d`/`--detached`.
 
 ```sh
-air-drive start [--remote-poll-interval <SECONDS>]
+air-drive start [--remote-poll-interval <SECONDS>] [-d|--detached]
 ```
 
 On the **first** start of a mapping (the Drive change cursor is empty), the
@@ -68,6 +69,11 @@ starting.
 
 - `--remote-poll-interval <SECONDS>` — override
   `[daemon].remote_poll_interval_seconds` (clamped to `10..=60`).
+- `-d`, `--detached` — fork the daemon into the background and return
+  immediately. Stdout/stderr are redirected to `<config-dir>/daemon.log` and the
+  process is placed in its own process group so it survives the launching shell.
+  Stop it with [`air-drive stop`](#stop). For a supervised, always-on service
+  prefer the systemd unit (`air-drive setup --install-service`).
 
 ### `pause` / `resume`
 
@@ -76,6 +82,16 @@ Signal a running daemon to pause or resume sync via the control socket.
 ```sh
 air-drive pause
 air-drive resume
+```
+
+### `stop`
+
+Stop a running daemon by sending it `SIGTERM` — the same graceful shutdown as
+Ctrl-C or `systemctl stop`. The target PID is read from the single-instance lock
+file. Exits `7` when no daemon is running on this config dir.
+
+```sh
+air-drive stop
 ```
 
 ### `status`
@@ -147,5 +163,5 @@ air-drive init [--force] [--link]
 | 4    | `MapLocalInvalid`       | Local path supplied to `map` doesn't exist or isn't a directory. |
 | 5    | `MapRemoteUnresolvable` | Remote folder supplied to `map` cannot be resolved.           |
 | 6    | `LockHeld`              | Single-instance lock held by another live daemon.             |
-| 7    | `NoDaemonRunning`       | `pause` / `resume` invoked but no running daemon found.        |
+| 7    | `NoDaemonRunning`       | `pause` / `resume` / `stop` invoked but no running daemon found. |
 | 8    | `UnlinkWhileRunning`    | `unlink` refused because the daemon is running.                |
