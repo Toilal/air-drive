@@ -1053,6 +1053,73 @@ async fn us2_9_permanent_delete_drops_row_without_tombstone() {
 }
 
 // ---------------------------------------------------------------------------
+// Startup scan replays local changes made while the daemon was DOWN — a modify,
+// a create, and a delete that inotify never saw (it wasn't running). On start
+// the scan diffs the local tree against sync_item and feeds the differences
+// through the same pipeline, so all three reach Drive.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_10_startup_scan_replays_offline_local_changes() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    // Two files already converged on both sides.
+    let keep_id = mock.insert_file(Some(&root_id), "keep.txt", b"v0");
+    let gone_id = mock.insert_file(Some(&root_id), "gone.txt", b"g0");
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("keep.txt", b"v0" as &[u8]), ("gone.txt", b"g0")]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(
+        &fx,
+        &mock,
+        &root_id,
+        &[
+            SyncedItem {
+                relative_path: "keep.txt",
+                remote_id: &keep_id,
+                content: b"v0",
+            },
+            SyncedItem {
+                relative_path: "gone.txt",
+                remote_id: &gone_id,
+                content: b"g0",
+            },
+        ],
+    );
+
+    // Changes made WHILE THE DAEMON IS DOWN (no inotify): modify, create, delete.
+    std::fs::write(fx.local_dir.join("keep.txt"), b"v1-edited-offline").unwrap();
+    std::fs::write(fx.local_dir.join("fresh.txt"), b"new-offline").unwrap();
+    std::fs::remove_file(fx.local_dir.join("gone.txt")).unwrap();
+
+    // Start: the startup scan must replay all three to Drive.
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    let converged = wait_until(T_LOCAL_TO_REMOTE, || async {
+        let st = mock.state.lock().unwrap();
+        let d = st.descendants(&root_id);
+        let modified = d
+            .iter()
+            .any(|(p, f)| p == "keep.txt" && f.content == b"v1-edited-offline");
+        let created = d
+            .iter()
+            .any(|(p, f)| p == "fresh.txt" && f.content == b"new-offline");
+        let deleted = !st.files.contains_key(&gone_id);
+        modified && created && deleted
+    })
+    .await;
+    assert!(
+        converged,
+        "startup scan should replay offline modify+create+delete within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // Seeding helpers — applied via sync rusqlite using the production schema.
 // ---------------------------------------------------------------------------
 

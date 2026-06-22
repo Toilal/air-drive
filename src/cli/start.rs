@@ -165,6 +165,10 @@ pub async fn run(
         local_root,
         remote_root_id,
         remote_poll_interval: Duration::from_secs(poll_interval),
+        // The offline-local catch-up scan only makes sense on a restart (a prior
+        // session already converged the tree). On the very first sync the initial
+        // reconciliation just ran, so there is nothing offline to replay.
+        catch_up_offline_local: !do_initial,
         runtime_dir: paths.runtime().to_path_buf(),
         watch_ignore_patterns: cfg.watch.ignore_patterns.clone(),
     };

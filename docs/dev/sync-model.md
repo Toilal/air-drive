@@ -132,9 +132,31 @@ doubling, capped at 60 s, with ±20 % jitter, up to `MAX_ATTEMPTS` (10). After t
 cap the op stays in `pending_operation` with `last_error` populated and the
 daemon reports `status: blocked` (`blocked_kind` ∈ `auth`, `remote`, `mapping`).
 
+## Startup catch-up
+
+The event paths only see changes that happen *while the daemon runs*. A change
+made while it was stopped is recovered at the next start, from both sides:
+
+- **Remote**: the change poller resumes from the persisted `pageToken`, so every
+  Drive delta since the last run is replayed through `apply_remote` (conflicts
+  included).
+- **Local**: inotify wasn't running while the daemon was down, so a dedicated
+  **startup local scan** (`reconcile::startup_local_scan`) diffs the local tree
+  against `sync_item` (the last-synced fingerprints) and feeds the differences —
+  new/modified/deleted files — through `apply_local` as synthesized watch events.
+  It reuses the continuous pipeline's three-way conflict + echo handling and does
+  **not** touch the change cursor. It runs on every **restart** (when a change
+  cursor already exists); it is skipped on the first sync, where the initial
+  reconciliation has just converged everything. A local modify/delete is only
+  replayed when the remote is still at the last-synced fingerprint (one
+  `files.get`); if both sides drifted while down it is deferred to the change
+  poller's conflict handler, so the scan never overwrites a concurrent edit.
+
 ## Safety net
 
-A periodic full reconciliation (`safety_net_interval_seconds`, ≥ 5 min) catches
-anything the event paths missed (a dropped inotify event, a poll that errored).
-It is a backstop, not the primary mechanism — see
-[`../../CLAUDE.md`](../../CLAUDE.md) §II.
+`safety_net_interval_seconds` is reserved for a future *periodic* full
+reconciliation — a backstop for events dropped while the daemon runs (a missed
+inotify event, a poll that errored), constrained to ≥ 5 min so it never becomes
+the primary mode (constitution principle II). That periodic loop is not wired
+yet; the **startup catch-up** above already covers the common
+daemon-was-down case.
