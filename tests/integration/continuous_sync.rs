@@ -1120,6 +1120,44 @@ async fn us2_10_startup_scan_replays_offline_local_changes() {
 }
 
 // ---------------------------------------------------------------------------
+// A file created inside a BRAND-NEW local directory propagates, even though the
+// recursive inotify watch on the new dir may not be registered before the file
+// lands (its own event can be lost). The Created(dir) handler rescans the dir
+// and enqueues what's already inside.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_11_local_new_dir_with_nested_file_propagates() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(&fx, &mock, &root_id, &[]);
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Create the directory and the file inside it back-to-back, racing the
+    // recursive-watch registration.
+    std::fs::create_dir(fx.local_dir.join("newdir")).unwrap();
+    std::fs::write(fx.local_dir.join("newdir/note.txt"), b"nested-while-live").unwrap();
+
+    let converged = wait_until(T_LOCAL_TO_REMOTE, || async {
+        let st = mock.state.lock().unwrap();
+        st.descendants(&root_id)
+            .iter()
+            .any(|(p, f)| p == "newdir/note.txt" && f.content == b"nested-while-live")
+    })
+    .await;
+    assert!(
+        converged,
+        "newdir/note.txt should reach Drive within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // Seeding helpers — applied via sync rusqlite using the production schema.
 // ---------------------------------------------------------------------------
 
