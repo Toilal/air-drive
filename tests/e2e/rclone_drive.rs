@@ -659,6 +659,158 @@ async fn e10_native_google_doc_becomes_local_shortcut() {
 }
 
 // ---------------------------------------------------------------------------
+// E11 — a folder created on Drive with a file inside it syncs down to local,
+// live (continuous daemon). Guards the remote change feed end-to-end, including
+// the parent-chain path resolution that the root-alias bug broke.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires real Drive credentials — run via `cargo test -- --ignored`"]
+async fn e11_remote_new_folder_with_file_syncs_locally() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    // A sentinel local file forces the initial sync to run and the change-cursor
+    // baseline to be persisted; once it lands on Drive we know the poller is live
+    // and any subsequent remote change will be after the baseline token.
+    fx.populate_local("ready.txt", b"sentinel");
+    seed_account_and_mapping(&fx);
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    let baseline = common::wait_until(Duration::from_secs(90), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "ready.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        baseline,
+        "initial sync should upload the sentinel; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Web-UI style: create a brand-new folder on Drive and drop a file inside it.
+    let content = b"remote nested payload";
+    let newdir_id = metadata::create_folder(&fx.drive, &fx.run_folder_id, "newdir")
+        .await
+        .expect("create newdir on Drive")
+        .id;
+    fx.drive
+        .upload_multipart(
+            &serde_json::json!({
+                "name": "note.txt",
+                "parents": [newdir_id],
+                "mimeType": "text/plain",
+            }),
+            "text/plain",
+            content,
+        )
+        .await
+        .expect("upload note.txt into newdir on Drive");
+
+    // The change feed must materialise the folder AND the nested file locally.
+    let synced = common::wait_until(Duration::from_secs(120), || async {
+        fx.local_dir.join("newdir/note.txt").is_file()
+    })
+    .await;
+    assert!(
+        synced,
+        "remote new folder + file should sync locally; alive? {:?}",
+        daemon.poll_alive()
+    );
+    assert_eq!(
+        std::fs::read(fx.local_dir.join("newdir/note.txt")).unwrap(),
+        content,
+        "downloaded content mismatch for newdir/note.txt"
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// E12 — a folder created locally with a file inside it syncs up to Drive, live
+// (continuous daemon). Symmetric counterpart of E11.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires real Drive credentials — run via `cargo test -- --ignored`"]
+async fn e12_local_new_folder_with_file_syncs_to_drive() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    // Sentinel: confirms the daemon is fully up (initial sync done, watcher
+    // attached) before we create the local folder so the inotify event is caught.
+    fx.populate_local("ready.txt", b"sentinel");
+    seed_account_and_mapping(&fx);
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    let ready = common::wait_until(Duration::from_secs(90), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "ready.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        ready,
+        "initial sync should upload the sentinel; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Create a brand-new local folder with a file inside (live inotify event).
+    let content = b"local nested payload";
+    std::fs::create_dir_all(fx.local_dir.join("newdir")).expect("create local newdir");
+    std::fs::write(fx.local_dir.join("newdir/note.txt"), content).expect("write local note.txt");
+
+    // The folder must be created on Drive and the nested file uploaded into it
+    // with a matching md5 (round-tripped through rclone).
+    let synced = common::wait_until(Duration::from_secs(120), || async {
+        let Ok(top) = metadata::list_children(&fx.drive, &fx.run_folder_id).await else {
+            return false;
+        };
+        let Some(dir) = top.iter().find(|c| c.is_folder() && c.name == "newdir") else {
+            return false;
+        };
+        metadata::list_children(&fx.drive, &dir.id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "note.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        synced,
+        "local new folder + file should sync to Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    let dir_id = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .find(|c| c.is_folder() && c.name == "newdir")
+        .expect("newdir on Drive")
+        .id;
+    let note = metadata::list_children(&fx.drive, &dir_id)
+        .await
+        .expect("list newdir")
+        .into_iter()
+        .find(|c| c.name == "note.txt")
+        .expect("note.txt on Drive");
+    assert_eq!(
+        note.md5.as_deref(),
+        Some(hex_md5(content).as_str()),
+        "md5 round-trip mismatch for newdir/note.txt"
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

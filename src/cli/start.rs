@@ -245,7 +245,15 @@ async fn ensure_remote_root(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             if !trashed {
-                return Ok(stored_id.to_owned());
+                // Resolve aliases (notably `"root"`) to the concrete folder id.
+                // The remote change feed resolves each file's path by walking
+                // its real parent chain up to this id; seeded with the literal
+                // `"root"` alias it would never match the real root folder id,
+                // so every descendant change would be dropped as "out of scope"
+                // and remote→local sync would fall back to the 5-min safety net
+                // instead of being event-driven. Drive echoes the concrete id
+                // in the `id` field even when queried by alias.
+                return Ok(resolved_root_id(stored_id, &v).to_owned());
             }
             tracing::warn!(
                 folder_id = %stored_id,
@@ -316,9 +324,34 @@ async fn ensure_remote_root(
     Ok(new_id)
 }
 
+/// Resolve a stored remote-root id (possibly the `"root"` alias) to the concrete
+/// Drive folder id echoed by a `files.get` probe, falling back to the stored id
+/// when the probe carries none. The change feed walks real parent chains, so it
+/// needs the concrete id rather than the alias.
+fn resolved_root_id<'a>(stored_id: &'a str, probe: &'a serde_json::Value) -> &'a str {
+    probe
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(stored_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_root_id_prefers_probe_id_over_alias() {
+        // The "root" alias must resolve to the concrete folder id Drive echoes,
+        // otherwise the change feed drops every descendant as out-of-scope.
+        let probe = serde_json::json!({ "id": "0ARealRootId", "mimeType": "application/vnd.google-apps.folder" });
+        assert_eq!(resolved_root_id("root", &probe), "0ARealRootId");
+        // A concrete stored id resolves to itself.
+        let probe2 = serde_json::json!({ "id": "0ARealRootId" });
+        assert_eq!(resolved_root_id("0ARealRootId", &probe2), "0ARealRootId");
+        // Missing `id` in the response falls back to the stored value.
+        let empty = serde_json::json!({});
+        assert_eq!(resolved_root_id("some-id", &empty), "some-id");
+    }
 
     #[test]
     fn ensure_root_succeeds_when_dir_exists() {
