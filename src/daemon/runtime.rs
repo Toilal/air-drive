@@ -45,6 +45,11 @@ const INITIAL_BACKOFF_SECS: i64 = 1;
 /// Hard cap on a single backoff delay before jitter.
 const MAX_BACKOFF_SECS: i64 = 60;
 
+/// `next_attempt_at` sentinel for an op abandoned after [`MAX_ATTEMPTS`]: far
+/// enough in the future (year ~3000) that `next_due` never reselects it, so it
+/// stops churning the queue while staying inspectable in `pending_operation`.
+const PARKED_FOREVER: i64 = 32_503_680_000;
+
 /// Daemon dispatcher loop.
 ///
 /// `wake` is signalled by the reconciler whenever it enqueues a new op so the
@@ -95,15 +100,21 @@ pub async fn run(
                     attempts = op.attempts,
                     "abandoning operation — manual resolution required"
                 );
-                // Move it far into the future so we don't busy-loop on it.
-                ops::mark_attempt(
+                // Park it effectively forever so it stops being re-selected every
+                // hour (the old `+3600` churned the queue and kept bumping
+                // `attempts` unboundedly). It stays in `pending_operation` with its
+                // `last_error` for inspection; manual resolution (or a future
+                // requeue path) is required to revive it.
+                if let Err(e) = ops::mark_attempt(
                     db.connection(),
                     op.id,
                     Some("max attempts reached"),
-                    unix_now() + 3600,
+                    PARKED_FOREVER,
                 )
                 .await
-                .ok();
+                {
+                    tracing::warn!(op_id = op.id.0, error = %e, "failed to park abandoned op");
+                }
                 continue;
             }
             match execute(
