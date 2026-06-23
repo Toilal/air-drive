@@ -47,11 +47,69 @@ pub struct DriveHttp {
     inner: Arc<Inner>,
 }
 
+/// Token-bucket burst capacity: the number of requests that may fire
+/// back-to-back before pacing kicks in. Sized to cover a bootstrap walk / change
+/// batch without throttling it.
+const RATE_BURST: f64 = 100.0;
+
+/// Sustained request ceiling (tokens refilled per second) once the burst is
+/// spent. Drive's quota is 1000 req / 100 s / user; steady-state work (one
+/// `changes.list` per ≥10 s poll) sits far below this, so the limiter's real job
+/// is to cap a pathological burst / runaway loop rather than to throttle normal
+/// use.
+const RATE_REFILL_PER_SEC: f64 = 10.0;
+
 struct Inner {
     client: Client,
     base_url: String,
     upload_base_url: String,
     token_provider: Arc<dyn TokenProvider>,
+    limiter: RateLimiter,
+}
+
+/// A simple token-bucket rate limiter shared across all Drive requests.
+struct RateLimiter {
+    state: tokio::sync::Mutex<BucketState>,
+    capacity: f64,
+    refill_per_sec: f64,
+}
+
+struct BucketState {
+    tokens: f64,
+    last: std::time::Instant,
+}
+
+impl RateLimiter {
+    fn new(capacity: f64, refill_per_sec: f64) -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(BucketState {
+                tokens: capacity,
+                last: std::time::Instant::now(),
+            }),
+            capacity,
+            refill_per_sec,
+        }
+    }
+
+    /// Block until a token is available, then consume it. The lock is held only
+    /// to refill + check the bucket, never across the sleep.
+    async fn acquire(&self) {
+        loop {
+            let wait = {
+                let mut s = self.state.lock().await;
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(s.last).as_secs_f64();
+                s.tokens = (s.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+                s.last = now;
+                if s.tokens >= 1.0 {
+                    s.tokens -= 1.0;
+                    return;
+                }
+                Duration::from_secs_f64((1.0 - s.tokens) / self.refill_per_sec)
+            };
+            tokio::time::sleep(wait).await;
+        }
+    }
 }
 
 impl DriveHttp {
@@ -72,6 +130,7 @@ impl DriveHttp {
                 base_url,
                 upload_base_url,
                 token_provider,
+                limiter: RateLimiter::new(RATE_BURST, RATE_REFILL_PER_SEC),
             }),
         })
     }
@@ -92,6 +151,7 @@ impl DriveHttp {
                 base_url: base_url.into(),
                 upload_base_url: upload_base_url.into(),
                 token_provider,
+                limiter: RateLimiter::new(RATE_BURST, RATE_REFILL_PER_SEC),
             }),
         })
     }
@@ -281,6 +341,9 @@ impl DriveHttp {
     {
         let mut delay = INITIAL_BACKOFF;
         for attempt in 1..=MAX_ATTEMPTS {
+            // Pace every request (including retries — they spend quota too)
+            // through the shared token bucket.
+            self.inner.limiter.acquire().await;
             match f().await {
                 Ok(v) => return Ok(v),
                 Err(e) if is_transient(&e) && attempt < MAX_ATTEMPTS => {
@@ -452,6 +515,29 @@ mod tests {
         let http = DriveHttp::with_bases(provider, "http://x/v3", "http://x/upload").unwrap();
         assert_eq!(http.url("files"), "http://x/v3/files");
         assert_eq!(http.url("/files/abc"), "http://x/v3/files/abc");
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_bursts_then_paces() {
+        // 2-token burst, refilling 10/s (one token per 100 ms).
+        let rl = RateLimiter::new(2.0, 10.0);
+        let start = std::time::Instant::now();
+        rl.acquire().await; // burst 1 — instant
+        rl.acquire().await; // burst 2 — instant
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "burst must not pace"
+        );
+        rl.acquire().await; // bucket empty — must wait ~100 ms for a refill
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "third acquire should pace: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "but not stall: {elapsed:?}"
+        );
     }
 
     #[test]
