@@ -133,6 +133,12 @@ pub async fn run(
                             .await
                             .ok();
                     }
+                    // A completed op proves Drive is reachable again — clear any
+                    // recoverable `transient` block the poller left, so recovery
+                    // is reflected without waiting for the next poll tick.
+                    if let Ok(true) = meta::clear_if_transient(db.connection()).await {
+                        tracing::info!(op_id = op.id.0, "op succeeded — cleared transient block");
+                    }
                     ops::delete(db.connection(), op.id).await.ok();
                 }
                 Err(Error::Oauth(msg)) => {

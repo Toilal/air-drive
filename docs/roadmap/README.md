@@ -23,7 +23,6 @@ the current status.
 | --- | ------------------------------------------------------------ | --------- | ----- |
 | 060 | [Bulk initial reconciliation](060-bulk-initial-sync.md)     | 🟡 medium | —     |
 | 070 | [Interactive setup wizard](070-interactive-setup.md)        | —         | —     |
-| 080 | [Surface recovered state](080-surface-recovered-state.md)   | —         | —     |
 
 ### Medium-term — multi-mapping, multi-account, broader Drive
 

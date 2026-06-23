@@ -169,7 +169,16 @@ so it is treated as a no-op rather than a spurious conflict.
 The dispatcher retries failed operations with exponential back-off: initial 1 s,
 doubling, capped at 60 s, with ±20 % jitter, up to `MAX_ATTEMPTS` (10). After the
 cap the op stays in `pending_operation` with `last_error` populated and the
-daemon reports `status: blocked` (`blocked_kind` ∈ `auth`, `remote`, `mapping`).
+daemon reports `status: blocked`.
+
+`blocked_kind` separates **terminal** failures that need user action — `auth`
+(re-link), `remote` (watched folder gone), `mapping` (local path missing) — from
+the **recoverable** `transient` kind. When a `changes.list` poll fails past the
+HTTP layer's own retry budget (network / 5xx), the poller flips to
+`transient` so `status` shows "Drive unreachable" instead of stalling silently.
+The first subsequent successful Drive call — a poll, or any dispatcher op —
+clears it (`meta::clear_if_transient`, which leaves the terminal kinds in place),
+so `status` reports healthy again on its own once Drive recovers.
 
 ## Startup catch-up
 

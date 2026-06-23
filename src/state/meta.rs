@@ -1,11 +1,14 @@
 //! `state_meta` (singleton row, id = 1) — daemon-level state surfaced by
 //! `air-drive status`. Two fields today:
 //!
-//! - **blocked** — set by any worker (dispatcher, poller) when it hits a
-//!   non-recoverable error like an OAuth refresh failure (`auth`), the
-//!   watched remote folder disappearing (`remote`), or the local mapping
-//!   target becoming unreadable (`mapping`). Cleared on `air-drive link`
-//!   (auth) or on user resolution.
+//! - **blocked** — set by any worker (dispatcher, poller) when it hits an
+//!   error it can't make progress past. Terminal kinds need user action: an
+//!   OAuth refresh failure (`auth`, cleared on `air-drive link`), the watched
+//!   remote folder disappearing (`remote`), or the local mapping target
+//!   becoming unreadable (`mapping`). The `transient` kind is **recoverable**:
+//!   the poller sets it when Drive is briefly unreachable (after the HTTP
+//!   layer's own retries) and clears it on the next successful Drive call, so
+//!   `air-drive status` can tell "blocked, act now" from "hiccup, recovered".
 //! - **last_sync** — bumped by the dispatcher after each successful sync
 //!   cycle so the status surface can report "last successful sync at X".
 //!
@@ -28,6 +31,10 @@ pub enum BlockedKind {
     Remote,
     /// Watched local path missing or unreadable.
     Mapping,
+    /// Drive temporarily unreachable (network / 5xx surviving the HTTP retry
+    /// budget). Recoverable: cleared automatically on the next successful Drive
+    /// call. Distinct from the terminal kinds, which need user action.
+    Transient,
 }
 
 impl BlockedKind {
@@ -36,6 +43,7 @@ impl BlockedKind {
             BlockedKind::Auth => "auth",
             BlockedKind::Remote => "remote",
             BlockedKind::Mapping => "mapping",
+            BlockedKind::Transient => "transient",
         }
     }
 
@@ -44,6 +52,7 @@ impl BlockedKind {
             "auth" => BlockedKind::Auth,
             "remote" => BlockedKind::Remote,
             "mapping" => BlockedKind::Mapping,
+            "transient" => BlockedKind::Transient,
             _ => return None,
         })
     }
@@ -113,10 +122,8 @@ pub async fn set_blocked(
     .map_err(Into::into)
 }
 
-/// Clear the block flag — the daemon believes it can make progress again.
-/// Called by `air-drive link` after a fresh token is on disk, and at every
-/// successful Drive call after a transient hiccup (TODO: not wired yet —
-/// today the daemon stays blocked until the user re-links).
+/// Clear the block flag unconditionally — the daemon believes it can make
+/// progress again. Called by `air-drive link` after a fresh token is on disk.
 pub async fn clear_blocked(conn: &Connection) -> Result<()> {
     conn.call(|c| {
         c.execute(
@@ -125,6 +132,26 @@ pub async fn clear_blocked(conn: &Connection) -> Result<()> {
             [],
         )?;
         Ok(())
+    })
+    .await
+    .map_err(Into::into)
+}
+
+/// Clear the block flag ONLY if it is the recoverable [`BlockedKind::Transient`]
+/// kind — the signal that Drive was briefly unreachable. Terminal kinds
+/// (`auth`, `remote`, `mapping`) need explicit user action and are left in
+/// place. Called on every successful Drive call by the poller and dispatcher.
+/// Returns `true` if a transient block was actually cleared, so the caller can
+/// log the recovery exactly once.
+pub async fn clear_if_transient(conn: &Connection) -> Result<bool> {
+    conn.call(|c| {
+        let rows = c.execute(
+            "UPDATE state_meta SET blocked_kind = NULL, blocked_message = NULL, \
+                                   blocked_at = NULL \
+             WHERE id = 1 AND blocked_kind = 'transient'",
+            [],
+        )?;
+        Ok(rows > 0)
     })
     .await
     .map_err(Into::into)
@@ -208,6 +235,30 @@ mod tests {
             .unwrap();
         clear_blocked(db.connection()).await.unwrap();
         assert!(get_blocked(db.connection()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_if_transient_clears_only_transient() {
+        let (_tmp, db) = open_temp().await;
+
+        // A transient block clears and reports that it did.
+        set_blocked(db.connection(), BlockedKind::Transient, "503 x3", 7)
+            .await
+            .unwrap();
+        assert!(clear_if_transient(db.connection()).await.unwrap());
+        assert!(get_blocked(db.connection()).await.unwrap().is_none());
+
+        // A terminal auth block is left untouched (needs a re-link).
+        set_blocked(db.connection(), BlockedKind::Auth, "revoked", 9)
+            .await
+            .unwrap();
+        assert!(!clear_if_transient(db.connection()).await.unwrap());
+        let still = get_blocked(db.connection()).await.unwrap().unwrap();
+        assert_eq!(still.kind, BlockedKind::Auth);
+
+        // No-op when nothing is blocked.
+        clear_blocked(db.connection()).await.unwrap();
+        assert!(!clear_if_transient(db.connection()).await.unwrap());
     }
 
     #[tokio::test]

@@ -142,12 +142,31 @@ pub async fn run(
                 continue;
             }
             Err(e) => {
-                // Transient failures are common (network, 503). Don't move the
-                // cursor — we'll retry on the next tick.
-                tracing::warn!(error = %e, "changes.list failed; will retry next tick");
+                // Transient failures are common (network, 503) and have already
+                // survived the HTTP layer's own retry budget. Don't move the
+                // cursor — we'll retry on the next tick — but surface the degraded
+                // state as a *recoverable* `transient` block so `status` shows
+                // "Drive unreachable" rather than a silent stall. The next
+                // successful tick clears it.
+                tracing::warn!(error = %e, "changes.list failed; marking transient block, will retry next tick");
+                let _ = crate::state::meta::set_blocked(
+                    db.connection(),
+                    crate::state::meta::BlockedKind::Transient,
+                    &e.to_string(),
+                    unix_now(),
+                )
+                .await;
                 continue;
             }
         };
+
+        // The poll succeeded: Drive is reachable. If a prior tick left a
+        // recoverable `transient` block, clear it now (terminal kinds stay).
+        match crate::state::meta::clear_if_transient(db.connection()).await {
+            Ok(true) => tracing::info!("changes.list succeeded — cleared transient block"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "failed to clear transient block"),
+        }
 
         let new_token = body
             .get("newStartPageToken")
