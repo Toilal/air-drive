@@ -73,8 +73,9 @@ cargo test --test rclone_drive -- --ignored  # e2e (needs real credentials)
   happens while the daemon runs; *startup* = it happens while stopped and must be
   recovered on the next start (remote via the cursor, local via the startup
   scan). Covers the file lifecycle — `create` / `modify` / `delete` — each across
-  all four cells (12 tests); further scenarios (rename, nested dirs) plug into the
-  same harness.
+  all four cells (12 tests), plus a `combined_*` batch that applies all five
+  operation kinds at once (create, modify, delete, file rename, folder rename)
+  across the same four cells (4 tests) to prove they compose without interfering.
 
 ## Running the daemon locally
 
