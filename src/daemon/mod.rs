@@ -281,7 +281,20 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     let _ = reconcile_local_task.await;
     let _ = poller_task.await;
     let _ = reconcile_remote_task.await;
-    let _ = dispatcher_task.await;
+    // The dispatcher may be mid-transfer (an rclone subprocess). All loops are
+    // cancel-guarded between ops, so it returns promptly when idle; bound the
+    // wait so an in-flight transfer can't hold shutdown open indefinitely. On
+    // timeout, abort the task — dropping its future kills the rclone child
+    // (`kill_on_drop`); the op stays `pending` and re-runs (idempotently) next
+    // start.
+    let mut dispatcher_task = dispatcher_task;
+    if tokio::time::timeout(Duration::from_secs(20), &mut dispatcher_task)
+        .await
+        .is_err()
+    {
+        tracing::warn!("dispatcher still draining at shutdown — aborting in-flight transfer");
+        dispatcher_task.abort();
+    }
     let _ = control_task.await;
     Ok(())
 }
