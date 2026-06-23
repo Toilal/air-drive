@@ -167,7 +167,10 @@ impl RcloneEngine {
             .arg("/dev/null") // never touch the user's rclone.conf
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Kill the child if its owning future is dropped (e.g. the dispatcher
+            // task is aborted at shutdown) instead of leaking a detached rclone.
+            .kill_on_drop(true);
         Ok(cmd)
     }
 
@@ -189,6 +192,11 @@ impl RcloneEngine {
     /// instead of a silent multi-minute pause. The last few stderr lines are
     /// retained and folded into [`Error::Rclone`] on a non-zero exit.
     async fn run_streaming(&self, mut cmd: Command) -> Result<()> {
+        // This path drains only stderr (where rclone writes `--stats`/`-v`). If
+        // stdout stayed piped and rclone wrote enough to it to fill the OS pipe
+        // buffer, rclone would block on the write and we'd deadlock waiting on
+        // stderr. The bulk transfer needs nothing from stdout, so discard it.
+        cmd.stdout(Stdio::null());
         let mut child = cmd.spawn().map_err(|e| Error::Rclone {
             stderr: format!("spawn rclone: {e}"),
         })?;
