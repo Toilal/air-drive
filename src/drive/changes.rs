@@ -51,6 +51,19 @@ pub struct RemoteChange {
     pub relative_path: Option<String>,
 }
 
+/// One fully-drained poll delta: the in-scope changes plus the
+/// `newStartPageToken` to persist *after* they are durably applied. The consumer
+/// owns cursor advancement so a failed apply re-fetches the batch next tick
+/// rather than losing the change (the cursor is never advanced past unapplied
+/// work).
+#[derive(Debug, Clone)]
+pub struct RemoteBatch {
+    /// In-scope changes for this tick, in feed order.
+    pub changes: Vec<RemoteChange>,
+    /// Cursor to persist once every change above has been applied.
+    pub new_token: String,
+}
+
 /// Snapshot of a Drive file as returned by `changes.list`. Mirrors the relevant
 /// subset of [`crate::drive::metadata::DriveFileMeta`] plus the parents list
 /// (needed for descendant filtering).
@@ -89,7 +102,7 @@ pub async fn run(
     db: Db,
     mapping_id: MappingId,
     root_id: String,
-    tx: mpsc::Sender<RemoteChange>,
+    tx: mpsc::Sender<RemoteBatch>,
     interval: Duration,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -161,6 +174,7 @@ pub async fn run(
             Err(e) => tracing::warn!(error = %e, "failed to clear transient block"),
         }
 
+        let mut batch: Vec<RemoteChange> = Vec::new();
         for c in changes {
             let file_id = c
                 .get("fileId")
@@ -211,23 +225,27 @@ pub async fn run(
                 }
             }
 
-            if tx
-                .send(RemoteChange {
-                    file_id,
-                    removed,
-                    file,
-                    relative_path,
-                })
-                .await
-                .is_err()
-            {
-                tracing::info!("changes consumer closed; poller exiting");
-                return Ok(());
-            }
+            batch.push(RemoteChange {
+                file_id,
+                removed,
+                file,
+                relative_path,
+            });
         }
 
-        if let Err(e) = cursor::set(db.connection(), mapping_id, &new_token, unix_now()).await {
-            tracing::warn!(error = %e, "failed to persist new cursor");
+        // Hand the whole tick to the consumer, which advances the cursor only
+        // after every change is applied. The cursor is NOT persisted here, so a
+        // failed apply re-fetches this delta next tick instead of skipping it.
+        if tx
+            .send(RemoteBatch {
+                changes: batch,
+                new_token,
+            })
+            .await
+            .is_err()
+        {
+            tracing::info!("changes consumer closed; poller exiting");
+            return Ok(());
         }
     }
 }

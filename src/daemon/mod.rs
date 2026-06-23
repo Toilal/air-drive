@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::daemon::in_flight::InFlightOps;
 use crate::daemon::pause::{PauseState, run_control_server};
-use crate::drive::changes::{self, RemoteChange};
+use crate::drive::changes::{self, RemoteBatch};
 use crate::drive::http::DriveHttp;
 use crate::engine::SyncEngine;
 use crate::engine::staging;
@@ -95,7 +95,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
 
     let (raw_tx, raw_rx) = mpsc::channel::<WatchEvent>(1024);
     let (debounced_tx, mut debounced_rx) = mpsc::channel::<WatchEvent>(1024);
-    let (remote_tx, mut remote_rx) = mpsc::channel::<RemoteChange>(1024);
+    let (remote_tx, mut remote_rx) = mpsc::channel::<RemoteBatch>(1024);
 
     // 1. Local watcher (notify) → raw events channel.
     let ignore_matcher = Arc::new(watch::build_ignore_matcher(&ctx.watch_ignore_patterns)?);
@@ -191,11 +191,29 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                     biased;
                     _ = cancel_remote.cancelled() => return,
                     maybe = remote_rx.recv() => {
-                        let Some(change) = maybe else { return; };
-                        if let Err(e) = continuous::apply_remote(change, &db, mapping_id, &local_root, &in_flight_remote).await {
-                            tracing::warn!(error = %e, "apply_remote failed");
-                        } else {
+                        let Some(batch) = maybe else { return; };
+                        let mut all_applied = true;
+                        let mut any_applied = false;
+                        for change in batch.changes {
+                            match continuous::apply_remote(change, &db, mapping_id, &local_root, &in_flight_remote).await {
+                                Ok(()) => any_applied = true,
+                                Err(e) => {
+                                    all_applied = false;
+                                    tracing::warn!(error = %e, "apply_remote failed; cursor will not advance past this batch");
+                                }
+                            }
+                        }
+                        if any_applied {
                             wake_remote.notify_one();
+                        }
+                        // Advance the cursor ONLY when the whole batch applied —
+                        // otherwise the poller re-fetches it next tick and the
+                        // failed change is retried (apply_remote is idempotent on
+                        // re-delivery) instead of being silently lost.
+                        if all_applied {
+                            if let Err(e) = crate::state::cursor::set(db.connection(), mapping_id, &batch.new_token, crate::state::unix_now()).await {
+                                tracing::warn!(error = %e, "failed to persist new cursor");
+                            }
                         }
                     }
                 }
