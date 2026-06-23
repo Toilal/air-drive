@@ -100,6 +100,22 @@ pub async fn apply_local(
             let from_rel = strip_root(&from, local_root)?;
             let to_rel = strip_root(&to, local_root)?;
             match items::get_by_relative_path(db.connection(), mapping_id, &from_rel).await? {
+                Some(item) if item.remote_id.is_none() => {
+                    // Renamed before its first upload landed: there is nothing on
+                    // Drive to move, and a `RenameRemote` would delete the row and
+                    // orphan the still-pending `Upload` (which then fails with
+                    // "sync_item vanished"). Just repath the row and (re)queue the
+                    // upload so the file lands at its new path.
+                    items::set_relative_path(db.connection(), item.id, &to_rel).await?;
+                    ops::enqueue(
+                        db.connection(),
+                        item.id,
+                        Operation::Upload,
+                        None,
+                        unix_now(),
+                    )
+                    .await?;
+                }
                 Some(item) => {
                     let payload = json!({ "new_relative_path": to_rel }).to_string();
                     ops::enqueue(

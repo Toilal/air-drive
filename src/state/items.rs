@@ -253,10 +253,24 @@ pub async fn set_remote_id(conn: &Connection, id: ItemId, remote_id: &str) -> Re
 pub async fn set_relative_path(conn: &Connection, id: ItemId, new_path: &str) -> Result<()> {
     let new_path = new_path.to_owned();
     conn.call(move |c| {
-        c.execute(
+        let tx = c.transaction()?;
+        // A row may already live at the destination — a file renamed/moved onto
+        // an existing tracked path (e.g. an editor's atomic save: write temp,
+        // rename over the target). Renaming onto it would trip the unique index
+        // on (mapping_id, relative_path) and wedge the op. The moved row wins;
+        // drop the stale occupant first so the move converges. (Mirrors the
+        // collision dedup in `rename_subtree`.)
+        tx.execute(
+            "DELETE FROM sync_item \
+             WHERE id != ?1 AND mapping_id = (SELECT mapping_id FROM sync_item WHERE id = ?1) \
+               AND relative_path = ?2",
+            params![id.0, new_path],
+        )?;
+        tx.execute(
             "UPDATE sync_item SET relative_path = ?1 WHERE id = ?2",
             params![new_path, id.0],
         )?;
+        tx.commit()?;
         Ok(())
     })
     .await
@@ -668,6 +682,33 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn set_relative_path_dedupes_on_destination_collision() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let conn = db.connection();
+        // `target.txt` already exists; renaming `src.txt` onto it must converge
+        // (drop the stale occupant) rather than trip the unique index.
+        let src = insert(conn, &sample(mapping_id, "src.txt")).await.unwrap();
+        let _target = insert(conn, &sample(mapping_id, "target.txt"))
+            .await
+            .unwrap();
+
+        set_relative_path(conn, src, "target.txt").await.unwrap();
+
+        // The moved row now lives at target.txt; exactly one row there; src gone.
+        assert!(
+            get_by_relative_path(conn, mapping_id, "src.txt")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let at_target = get_by_relative_path(conn, mapping_id, "target.txt")
+            .await
+            .unwrap()
+            .expect("a row at target.txt");
+        assert_eq!(at_target.id, src, "the moved row must win the collision");
     }
 
     #[tokio::test]
