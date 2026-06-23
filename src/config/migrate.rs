@@ -74,6 +74,11 @@ const FIELD_DESCRIPTIONS: &[(&str, &str, &str)] = &[
         "When true, the watched folder is created without prompting if missing. When false (default), the CLI prompts the user interactively on a TTY, or fails conservatively otherwise.",
     ),
     (
+        "watch",
+        "symlinks",
+        "How symlinks under the watched root are handled: skip (default; ignored) or follow (resolved to their target and synced; targets outside the root are skipped, cycles are broken).",
+    ),
+    (
         "oauth",
         "client_id",
         "Override the embedded OAuth client_id with your own Google Cloud Desktop client.",

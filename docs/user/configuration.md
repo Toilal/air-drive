@@ -70,6 +70,29 @@ Display metadata for the mapped pair. The authoritative `remote_folder_id` and
 | ----------------- | ----------- | -------------- | --------------------------------------------------------------------------- |
 | `ignore_patterns` | list<string> | *(seeded, see below)* | Glob patterns matched against the **file name** (not the full path). Matching files are never synced (no upload, rename, or delete propagation). Overriding the list replaces it wholesale. |
 | `auto_create_root` | bool       | `false`        | When `true`, `map` / `start` create `mapping.local_path` (and parents) without prompting if missing. When `false`, the CLI prompts; on non-interactive stdin (systemd, piped script) or decline, it refuses to start with an actionable error. |
+| `symlinks`        | `"skip"` \| `"follow"` | `"skip"` | How symlinks under the watched root are handled. See [Symlinks](#symlinks). |
+
+#### Symlinks
+
+By default (`symlinks = "skip"`) symlinks under the watched root are ignored
+entirely — not uploaded, and not reported.
+
+Set `symlinks = "follow"` to resolve each symlink to its target and sync it as a
+regular file or directory (the target's bytes are uploaded). Two safety rails
+apply automatically:
+
+- **Escape guard** — a link whose target resolves **outside** the watched root
+  is skipped, so a stray symlink can't pull unrelated files into the sync.
+- **Cycle guard** — directory-symlink loops (a link pointing back to an
+  ancestor, mutually-referential links) are detected and broken, so a walk can't
+  recurse forever.
+
+Note that following a **directory** symlink syncs its contents, but live edits
+*inside* a symlinked directory are picked up on the next start / safety-net pass
+rather than instantly — the inotify watcher does not descend through symlinks.
+
+Recording the link itself (a `preserve` mode) is not yet supported; Drive has no
+native symlink type ([issue #2](https://github.com/Toilal/air-drive/issues/2)).
 
 #### Default ignore patterns
 
@@ -132,4 +155,5 @@ path = "/usr/local/bin/rclone"
 [watch]
 auto_create_root = false
 ignore_patterns = [".*.swp", "*~", ".DS_Store"]
+symlinks = "skip"
 ```

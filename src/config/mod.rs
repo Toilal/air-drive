@@ -153,6 +153,9 @@ pub struct WatchConfig {
     /// unit, piped script) or when the user declines, it refuses to start with
     /// an actionable error.
     pub auto_create_root: bool,
+    /// How symlinks under the watched root are handled. Defaults to
+    /// [`SymlinkPolicy::Skip`] (the historical behaviour). See [`SymlinkPolicy`].
+    pub symlinks: SymlinkPolicy,
 }
 
 impl Default for WatchConfig {
@@ -163,8 +166,31 @@ impl Default for WatchConfig {
                 .map(|s| (*s).to_string())
                 .collect(),
             auto_create_root: false,
+            symlinks: SymlinkPolicy::default(),
         }
     }
+}
+
+/// Policy for symlinks discovered under the watched root.
+///
+/// - [`Skip`](SymlinkPolicy::Skip) (default) — symlinks are ignored entirely:
+///   no upload, no rename/delete propagation. The pre-existing behaviour.
+/// - [`Follow`](SymlinkPolicy::Follow) — a symlink is resolved to its target
+///   and synced as a regular file or directory. Targets that resolve **outside**
+///   the watched root are skipped (so a stray link can't exfiltrate unrelated
+///   files), and directory-symlink cycles are detected and broken.
+///
+/// `preserve` (recording the link itself as a sidecar) is intentionally not
+/// offered yet — Drive has no native symlink type, so the encoding is deferred
+/// (issue #2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymlinkPolicy {
+    /// Ignore symlinks entirely (default).
+    #[default]
+    Skip,
+    /// Resolve symlinks to their target and sync the target's content.
+    Follow,
 }
 
 /// Source-of-truth list of file-name globs the watcher ignores by default.

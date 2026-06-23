@@ -56,6 +56,8 @@ pub struct DaemonContext {
     pub runtime_dir: PathBuf,
     /// File-name glob patterns the watcher ignores (from `[watch].ignore_patterns`).
     pub watch_ignore_patterns: Vec<String>,
+    /// How symlinks under the watched root are handled (from `[watch].symlinks`).
+    pub symlinks: crate::config::SymlinkPolicy,
 }
 
 /// How long a tombstone — a trashed file's row kept so a restore re-links instead
@@ -97,7 +99,8 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
 
     // 1. Local watcher (notify) → raw events channel.
     let ignore_matcher = Arc::new(watch::build_ignore_matcher(&ctx.watch_ignore_patterns)?);
-    let (_watcher_keepalive, watcher_rx) = watch::Watcher::start(&ctx.local_root, ignore_matcher)?;
+    let (_watcher_keepalive, watcher_rx) =
+        watch::Watcher::start(&ctx.local_root, ignore_matcher, ctx.symlinks)?;
     let raw_forwarder = forward_channel(watcher_rx, raw_tx, cancel.clone());
 
     // 1b. Startup catch-up: replay any local change made while the daemon was
@@ -113,6 +116,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
             ctx.mapping_id,
             &ctx.local_root,
             &ctx.watch_ignore_patterns,
+            ctx.symlinks,
         )
         .await
         {
@@ -134,6 +138,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         let db = ctx.db.clone();
         let local_root = ctx.local_root.clone();
         let mapping_id = ctx.mapping_id;
+        let symlinks = ctx.symlinks;
         let wake_local = wake.clone();
         let cancel_local = cancel.clone();
         tokio::spawn(async move {
@@ -143,7 +148,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                     _ = cancel_local.cancelled() => return,
                     maybe = debounced_rx.recv() => {
                         let Some(ev) = maybe else { return; };
-                        if let Err(e) = continuous::apply_local(ev, &db, mapping_id, &local_root).await {
+                        if let Err(e) = continuous::apply_local(ev, &db, mapping_id, &local_root, symlinks).await {
                             tracing::warn!(error = %e, "apply_local failed");
                         } else {
                             wake_local.notify_one();

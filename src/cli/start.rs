@@ -129,6 +129,7 @@ pub async fn run(
             &local_root,
             &remote_root_id,
             &cfg.watch.ignore_patterns,
+            cfg.watch.symlinks,
         )
         .await?;
     }
@@ -171,6 +172,7 @@ pub async fn run(
         catch_up_offline_local: !do_initial,
         runtime_dir: paths.runtime().to_path_buf(),
         watch_ignore_patterns: cfg.watch.ignore_patterns.clone(),
+        symlinks: cfg.watch.symlinks,
     };
 
     let cancel = CancellationToken::new();

@@ -1,9 +1,10 @@
 //! Local filesystem watcher built on the `notify` crate.
 //!
 //! [`Watcher`] wraps `notify::RecommendedWatcher` (inotify on Linux), maps raw
-//! `notify::Event`s into the daemon-internal [`WatchEvent`] enum, filters out
-//! symlinks + special files, and forwards everything to a tokio mpsc channel
-//! that the debouncer (`super::debounce`) consumes.
+//! `notify::Event`s into the daemon-internal [`WatchEvent`] enum, applies the
+//! `[watch].symlinks` policy ([`classify_local`]) and drops special files, and
+//! forwards everything to a tokio mpsc channel that the debouncer
+//! (`super::debounce`) consumes.
 //!
 //! The watcher holds the inotify file descriptor for the entire lifetime of the
 //! returned struct — dropping it cancels the subscription.
@@ -20,6 +21,7 @@ use notify::event::{ModifyKind, RenameMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher};
 use tokio::sync::mpsc;
 
+use crate::config::SymlinkPolicy;
 use crate::error::{Error, Result};
 
 /// How long a buffered rename `From` half-event waits for its matching `To`
@@ -97,6 +99,7 @@ impl Watcher {
     pub fn start(
         local_root: &Path,
         ignore: Arc<GlobSet>,
+        symlinks: SymlinkPolicy,
     ) -> Result<(Self, mpsc::Receiver<WatchEvent>)> {
         let (tx, rx) = mpsc::channel::<WatchEvent>(1024);
         let root = Arc::new(local_root.to_path_buf());
@@ -115,9 +118,13 @@ impl Watcher {
                     return;
                 }
             };
-            for converted in
-                convert_event(&ev, &handler_root, &handler_ignore, &mut pending_renames)
-            {
+            for converted in convert_event(
+                &ev,
+                &handler_root,
+                &handler_ignore,
+                symlinks,
+                &mut pending_renames,
+            ) {
                 // `try_send` is non-blocking. Capacity > 1024 should swallow
                 // every realistic burst, but if it doesn't we'd rather drop a
                 // single event than block the inotify thread.
@@ -138,7 +145,7 @@ impl Watcher {
 
 /// Convert a `notify::Event` to zero or more [`WatchEvent`]s. Filters out:
 ///
-/// - symlinks and special files (lstat + reject non-regular non-directory)
+/// - paths rejected by the `symlinks` policy / special files ([`classify_local`])
 /// - paths under `<root>/.air-drive-partial/` — those are our own staging artefacts
 ///
 /// ## Rename correlation
@@ -162,6 +169,7 @@ fn convert_event(
     ev: &notify::Event,
     root: &Path,
     ignore: &GlobSet,
+    symlinks: SymlinkPolicy,
     pending_renames: &mut HashMap<usize, (PathBuf, Instant)>,
 ) -> Vec<WatchEvent> {
     let mut out = Vec::new();
@@ -171,7 +179,7 @@ fn convert_event(
         .paths
         .iter()
         .filter(|p| !p.starts_with(&stage_dir))
-        .filter(|p| accept_local_file(p, ignore))
+        .filter(|p| accept_local_file(p, ignore, root, symlinks))
         .collect();
     let tracker = ev.attrs.tracker();
 
@@ -241,13 +249,67 @@ fn evict_stale_renames(pending: &mut HashMap<usize, (PathBuf, Instant)>) {
     pending.retain(|_, (_, seen)| now.duration_since(*seen) < RENAME_CORRELATION_TTL);
 }
 
-/// Returns `true` if the path either doesn't exist (deletes get filtered to None
-/// metadata) OR is a regular file / directory. Symlinks and special files
-/// (FIFO, socket, block/char device) are rejected with a one-line `tracing::info`.
-/// Files whose name matches one of the user-configurable `watch.ignore_patterns`
-/// globs are also rejected — these are typically editor / OS scratch files
-/// (`.foo.swp`, `.DS_Store`, …) the user never wants synced.
-fn accept_local_file(path: &Path, ignore: &GlobSet) -> bool {
+/// What a local path resolves to for sync purposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalKind {
+    /// A regular file (or, under [`SymlinkPolicy::Follow`], a symlink to one).
+    File,
+    /// A directory (or, under [`SymlinkPolicy::Follow`], a symlink to one).
+    Dir,
+}
+
+/// Classify `path` (an entry under `root`) per the symlink `policy`, returning
+/// the effective kind to sync, or `None` to skip.
+///
+/// Non-symlinks map straight through: a regular file → [`LocalKind::File`], a
+/// directory → [`LocalKind::Dir`], anything else (FIFO, socket, device) →
+/// `None`. A symlink is skipped under [`SymlinkPolicy::Skip`]; under
+/// [`SymlinkPolicy::Follow`] it is resolved to its target via `canonicalize`
+/// (which chases the whole chain and fails on broken / cyclic `ELOOP` links —
+/// both correctly skipped) and then skipped if the target is a special file or
+/// resolves **outside** `root` (an escape guard so a stray link can't pull in
+/// unrelated files). This is the single source of truth shared by the live
+/// watcher filter and the tree walkers in `reconcile`.
+pub fn classify_local(path: &Path, root: &Path, policy: SymlinkPolicy) -> Option<LocalKind> {
+    let lmeta = std::fs::symlink_metadata(path).ok()?;
+    if lmeta.file_type().is_symlink() {
+        if policy == SymlinkPolicy::Skip {
+            return None;
+        }
+        let target = std::fs::canonicalize(path).ok()?;
+        let canon_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if !target.starts_with(&canon_root) {
+            tracing::info!(
+                path = %path.display(),
+                "skipping symlink whose target resolves outside the watched root"
+            );
+            return None;
+        }
+        let tmeta = std::fs::metadata(&target).ok()?;
+        if tmeta.is_dir() {
+            return Some(LocalKind::Dir);
+        }
+        if tmeta.is_file() {
+            return Some(LocalKind::File);
+        }
+        return None;
+    }
+    if lmeta.is_dir() {
+        Some(LocalKind::Dir)
+    } else if lmeta.is_file() {
+        Some(LocalKind::File)
+    } else {
+        None
+    }
+}
+
+/// Returns `true` if the watcher should forward an event for `path`. A path that
+/// no longer exists (a Delete event) is accepted — the reconciler decides what
+/// to do. Otherwise the path must classify to a syncable file/dir under the
+/// `symlinks` policy ([`classify_local`]). Files whose name matches one of the
+/// user-configurable `watch.ignore_patterns` globs are rejected first — these
+/// are typically editor / OS scratch files (`.foo.swp`, `.DS_Store`, …).
+fn accept_local_file(path: &Path, ignore: &GlobSet, root: &Path, policy: SymlinkPolicy) -> bool {
     if let Some(name) = path.file_name()
         && ignore.is_match(Path::new(name))
     {
@@ -257,20 +319,17 @@ fn accept_local_file(path: &Path, ignore: &GlobSet) -> bool {
         );
         return false;
     }
-    let md = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        // File no longer exists — likely a Delete event. Don't filter it out
-        // here; the reconciler decides what to do when it sees a Deleted on a
-        // path that doesn't exist anymore.
-        Err(_) => return true,
-    };
-    let ft = md.file_type();
-    if ft.is_file() || ft.is_dir() {
+    // Path gone (likely a Delete) — don't filter it out; the reconciler handles
+    // a Deleted on a path that no longer exists.
+    if std::fs::symlink_metadata(path).is_err() {
         return true;
     }
-    tracing::info!(
+    if classify_local(path, root, policy).is_some() {
+        return true;
+    }
+    tracing::debug!(
         path = %path.display(),
-        "ignoring non-regular file (symlink, fifo, socket, device)"
+        "ignoring path (symlink policy or non-regular file)"
     );
     false
 }
@@ -291,6 +350,78 @@ mod tests {
     fn matches(name: &str) -> bool {
         let m = default_matcher();
         m.is_match(Path::new(name))
+    }
+
+    // --- classify_local: symlink policy (Skip vs Follow) + guards ------------
+
+    #[test]
+    fn classify_plain_file_and_dir_regardless_of_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("f.txt"), b"x").unwrap();
+        std::fs::create_dir(root.join("d")).unwrap();
+        for policy in [SymlinkPolicy::Skip, SymlinkPolicy::Follow] {
+            assert_eq!(
+                classify_local(&root.join("f.txt"), root, policy),
+                Some(LocalKind::File)
+            );
+            assert_eq!(
+                classify_local(&root.join("d"), root, policy),
+                Some(LocalKind::Dir)
+            );
+        }
+    }
+
+    #[test]
+    fn classify_symlink_to_file_follows_or_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("target.txt"), b"payload").unwrap();
+        let link = root.join("link.txt");
+        std::os::unix::fs::symlink(root.join("target.txt"), &link).unwrap();
+
+        assert_eq!(classify_local(&link, root, SymlinkPolicy::Skip), None);
+        assert_eq!(
+            classify_local(&link, root, SymlinkPolicy::Follow),
+            Some(LocalKind::File)
+        );
+    }
+
+    #[test]
+    fn classify_symlink_to_dir_follows_or_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("realdir")).unwrap();
+        let link = root.join("linkdir");
+        std::os::unix::fs::symlink(root.join("realdir"), &link).unwrap();
+
+        assert_eq!(classify_local(&link, root, SymlinkPolicy::Skip), None);
+        assert_eq!(
+            classify_local(&link, root, SymlinkPolicy::Follow),
+            Some(LocalKind::Dir)
+        );
+    }
+
+    #[test]
+    fn classify_skips_symlink_escaping_the_root_even_when_following() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"nope").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let link = root.join("escape.txt");
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), &link).unwrap();
+
+        // Follow must NOT pull in a target that resolves outside the watched root.
+        assert_eq!(classify_local(&link, root, SymlinkPolicy::Follow), None);
+    }
+
+    #[test]
+    fn classify_skips_broken_symlink_when_following() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let link = root.join("dangling.txt");
+        std::os::unix::fs::symlink(root.join("does-not-exist"), &link).unwrap();
+        assert_eq!(classify_local(&link, root, SymlinkPolicy::Follow), None);
     }
 
     #[test]
@@ -345,7 +476,8 @@ mod tests {
     #[tokio::test]
     async fn watcher_emits_created_for_new_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let (_w, mut rx) = Watcher::start(tmp.path(), default_matcher()).unwrap();
+        let (_w, mut rx) =
+            Watcher::start(tmp.path(), default_matcher(), SymlinkPolicy::Skip).unwrap();
         // Slight pause so the watcher's setup completes.
         tokio::time::sleep(Duration::from_millis(100)).await;
         std::fs::write(tmp.path().join("a.txt"), b"hi").unwrap();
@@ -402,15 +534,21 @@ mod tests {
             &[&from, &to],
         );
 
-        assert_eq!(convert_event(&e_from, root, &m, &mut pending), vec![]);
         assert_eq!(
-            convert_event(&e_to, root, &m, &mut pending),
+            convert_event(&e_from, root, &m, SymlinkPolicy::Skip, &mut pending),
+            vec![]
+        );
+        assert_eq!(
+            convert_event(&e_to, root, &m, SymlinkPolicy::Skip, &mut pending),
             vec![WatchEvent::Renamed {
                 from: from.clone(),
                 to: to.clone()
             }]
         );
-        assert_eq!(convert_event(&e_both, root, &m, &mut pending), vec![]);
+        assert_eq!(
+            convert_event(&e_both, root, &m, SymlinkPolicy::Skip, &mut pending),
+            vec![]
+        );
         assert!(pending.is_empty(), "the tracker buffer must be drained");
     }
 
@@ -427,7 +565,7 @@ mod tests {
             &[&to],
         );
         assert_eq!(
-            convert_event(&e_to, root, &m, &mut pending),
+            convert_event(&e_to, root, &m, SymlinkPolicy::Skip, &mut pending),
             vec![WatchEvent::Created(to)]
         );
     }
@@ -445,7 +583,10 @@ mod tests {
             Some(13),
             &[&from],
         );
-        assert_eq!(convert_event(&e_from, root, &m, &mut pending), vec![]);
+        assert_eq!(
+            convert_event(&e_from, root, &m, SymlinkPolicy::Skip, &mut pending),
+            vec![]
+        );
         assert_eq!(pending.len(), 1, "the From half is buffered");
     }
 
@@ -468,9 +609,12 @@ mod tests {
             Some(21),
             &[&from, &to],
         );
-        assert_eq!(convert_event(&e_from, root, &m, &mut pending), vec![]);
         assert_eq!(
-            convert_event(&e_both, root, &m, &mut pending),
+            convert_event(&e_from, root, &m, SymlinkPolicy::Skip, &mut pending),
+            vec![]
+        );
+        assert_eq!(
+            convert_event(&e_both, root, &m, SymlinkPolicy::Skip, &mut pending),
             vec![WatchEvent::Renamed { from, to }]
         );
     }
@@ -490,7 +634,7 @@ mod tests {
             &[&p],
         );
         assert_eq!(
-            convert_event(&create, root, &m, &mut pending),
+            convert_event(&create, root, &m, SymlinkPolicy::Skip, &mut pending),
             vec![WatchEvent::Created(p.clone())]
         );
         let modify = name_event(
@@ -499,7 +643,7 @@ mod tests {
             &[&p],
         );
         assert_eq!(
-            convert_event(&modify, root, &m, &mut pending),
+            convert_event(&modify, root, &m, SymlinkPolicy::Skip, &mut pending),
             vec![WatchEvent::Modified(p.clone())]
         );
         let remove = name_event(
@@ -508,7 +652,7 @@ mod tests {
             &[&p],
         );
         assert_eq!(
-            convert_event(&remove, root, &m, &mut pending),
+            convert_event(&remove, root, &m, SymlinkPolicy::Skip, &mut pending),
             vec![WatchEvent::Deleted(p)]
         );
     }
@@ -520,7 +664,8 @@ mod tests {
     async fn watcher_emits_renamed_for_within_tree_rename() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.txt"), b"hi").unwrap();
-        let (_w, mut rx) = Watcher::start(tmp.path(), default_matcher()).unwrap();
+        let (_w, mut rx) =
+            Watcher::start(tmp.path(), default_matcher(), SymlinkPolicy::Skip).unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
         std::fs::rename(tmp.path().join("a.txt"), tmp.path().join("b.txt")).unwrap();
 
@@ -557,7 +702,8 @@ mod tests {
     async fn watcher_emits_deleted_when_file_removed() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("b.txt"), b"hi").unwrap();
-        let (_w, mut rx) = Watcher::start(tmp.path(), default_matcher()).unwrap();
+        let (_w, mut rx) =
+            Watcher::start(tmp.path(), default_matcher(), SymlinkPolicy::Skip).unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         std::fs::remove_file(tmp.path().join("b.txt")).unwrap();
         // Drain until we see Deleted (the platform may emit Modified first).
@@ -583,7 +729,8 @@ mod tests {
         std::fs::write(&target, b"t").unwrap();
         let link = tmp.path().join("link.txt");
 
-        let (_w, mut rx) = Watcher::start(tmp.path(), default_matcher()).unwrap();
+        let (_w, mut rx) =
+            Watcher::start(tmp.path(), default_matcher(), SymlinkPolicy::Skip).unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Create a symlink — the create event should be filtered out.

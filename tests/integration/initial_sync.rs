@@ -522,6 +522,77 @@ async fn us1_7_initial_sync_honours_ignore_patterns() {
 }
 
 // ---------------------------------------------------------------------------
+// `[watch].symlinks` policy: skip (default) drops a symlink; follow uploads the
+// link target's content. Issue #2.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us1_9_symlinks_skipped_by_default() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("real.txt", b"link payload" as &[u8])]);
+    std::os::unix::fs::symlink(fx.local_dir.join("real.txt"), fx.local_dir.join("link.txt"))
+        .unwrap();
+    fx.write_default_config(); // [watch].symlinks defaults to skip
+    fx.write_token_file();
+    seed_account(&fx, "alice@example.com");
+    seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
+
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start");
+    let (code, _stdout, stderr) = run(cmd);
+    assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
+
+    let names: Vec<String> = mock
+        .state
+        .lock()
+        .unwrap()
+        .descendants(&root_id)
+        .iter()
+        .map(|(p, _)| p.clone())
+        .collect();
+    assert!(names.contains(&"real.txt".to_string()), "got {names:?}");
+    assert!(
+        !names.contains(&"link.txt".to_string()),
+        "a symlink must not be uploaded under the default skip policy; got {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn us1_9_symlinks_followed_when_configured() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("real.txt", b"link payload" as &[u8])]);
+    std::os::unix::fs::symlink(fx.local_dir.join("real.txt"), fx.local_dir.join("link.txt"))
+        .unwrap();
+    fx.write_config_with_symlinks("follow");
+    fx.write_token_file();
+    seed_account(&fx, "alice@example.com");
+    seed_mapping(&fx, &fx.local_dir.to_string_lossy(), &root_id);
+
+    let mut cmd = air_drive_cmd(&fx, &mock);
+    cmd.arg("start");
+    let (code, _stdout, stderr) = run(cmd);
+    assert_eq!(code, 0, "initial-sync should converge; stderr=\n{stderr}");
+
+    // Both the real file and the followed symlink reach Drive, carrying the
+    // target's bytes.
+    let descendants = mock.state.lock().unwrap().descendants(&root_id);
+    let link = descendants
+        .iter()
+        .find(|(p, _)| p == "link.txt")
+        .expect("followed symlink should be uploaded under the follow policy");
+    assert_eq!(
+        link.1.content, b"link payload",
+        "followed symlink must carry the target's content"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Re-running the initial pass after a lost cursor is idempotent. Mirrors the
 // real "it synced files but says No sync state yet" report: a first pass that
 // copied files but never persisted the change cursor must re-run cleanly, not

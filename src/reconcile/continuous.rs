@@ -16,6 +16,7 @@ use std::path::Path;
 
 use serde_json::json;
 
+use crate::config::SymlinkPolicy;
 use crate::daemon::in_flight::InFlightOps;
 use crate::drive::changes::RemoteChange;
 use crate::error::{Error, Result};
@@ -25,14 +26,16 @@ use crate::state::items::{self, ItemId, ItemKind, ItemState, NewSyncItem};
 use crate::state::mapping::MappingId;
 use crate::state::ops::{self, Operation};
 use crate::state::unix_now;
-use crate::watch::WatchEvent;
+use crate::watch::{LocalKind, WatchEvent, classify_local};
 
-/// Convert a `WatchEvent` into `pending_operation` rows.
+/// Convert a `WatchEvent` into `pending_operation` rows. `symlinks` decides how
+/// symlinks encountered while rescanning a new directory are treated.
 pub async fn apply_local(
     event: WatchEvent,
     db: &Db,
     mapping_id: MappingId,
     local_root: &Path,
+    symlinks: SymlinkPolicy,
 ) -> Result<()> {
     match event {
         WatchEvent::Created(p) | WatchEvent::Modified(p) => {
@@ -44,7 +47,7 @@ pub async fn apply_local(
                 // watch on it, so the file's own Created event is never
                 // delivered. Walk the new dir and enqueue everything already
                 // inside it (parent-first) so nothing is silently dropped.
-                for (child_rel, is_dir) in walk_subtree(&p, local_root)? {
+                for (child_rel, is_dir) in walk_subtree(&p, local_root, symlinks)? {
                     if is_dir {
                         enqueue_local_dir(db, mapping_id, &child_rel).await?;
                     } else {
@@ -116,6 +119,7 @@ pub async fn apply_local(
                         db,
                         mapping_id,
                         local_root,
+                        symlinks,
                     ))
                     .await;
                 }
@@ -200,16 +204,27 @@ async fn enqueue_local_file(db: &Db, mapping_id: MappingId, rel: &str) -> Result
 
 /// Walk every descendant of `dir` (a path under `local_root`), returning
 /// `(relative_path, is_dir)` sorted parent-first so a directory is always
-/// enqueued before its children. Skips the staging directory; symlinks and
-/// special files are ignored, mirroring the watcher.
-fn walk_subtree(dir: &Path, local_root: &Path) -> Result<Vec<(String, bool)>> {
+/// enqueued before its children. Skips the staging directory; symlinks are
+/// handled per `symlinks` ([`classify_local`]), mirroring the watcher.
+fn walk_subtree(
+    dir: &Path,
+    local_root: &Path,
+    symlinks: SymlinkPolicy,
+) -> Result<Vec<(String, bool)>> {
     let mut out = Vec::new();
-    collect_subtree(dir, local_root, &mut out)?;
+    let mut visited = std::collections::HashSet::new();
+    collect_subtree(dir, local_root, symlinks, &mut visited, &mut out)?;
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
-fn collect_subtree(dir: &Path, local_root: &Path, out: &mut Vec<(String, bool)>) -> Result<()> {
+fn collect_subtree(
+    dir: &Path,
+    local_root: &Path,
+    symlinks: SymlinkPolicy,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    out: &mut Vec<(String, bool)>,
+) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -221,13 +236,26 @@ fn collect_subtree(dir: &Path, local_root: &Path, out: &mut Vec<(String, bool)>)
             continue;
         }
         let path = entry.path();
-        let Ok(meta) = entry.metadata() else { continue };
         let rel = strip_root(&path, local_root)?;
-        if meta.is_dir() {
-            out.push((rel, true));
-            collect_subtree(&path, local_root, out)?;
-        } else if meta.is_file() {
-            out.push((rel, false));
+        match classify_local(&path, local_root, symlinks) {
+            Some(LocalKind::Dir) => {
+                out.push((rel, true));
+                // Loop guard: when following symlinks, descend into each
+                // canonical dir at most once so a link cycle can't recurse
+                // forever. `Skip` never follows a link, so it descends freely.
+                let descend = match symlinks {
+                    SymlinkPolicy::Follow => match std::fs::canonicalize(&path) {
+                        Ok(canon) => visited.insert(canon),
+                        Err(_) => false,
+                    },
+                    SymlinkPolicy::Skip => true,
+                };
+                if descend {
+                    collect_subtree(&path, local_root, symlinks, visited, out)?;
+                }
+            }
+            Some(LocalKind::File) => out.push((rel, false)),
+            None => {}
         }
     }
     Ok(())
@@ -781,9 +809,15 @@ mod tests {
         tokio::fs::write(&path, "{}\n").await.unwrap();
 
         // The watcher echo of our own write must NOT enqueue an upload.
-        apply_local(WatchEvent::Created(path), &db, mapping_id, root)
-            .await
-            .unwrap();
+        apply_local(
+            WatchEvent::Created(path),
+            &db,
+            mapping_id,
+            root,
+            SymlinkPolicy::Skip,
+        )
+        .await
+        .unwrap();
         assert!(
             ops::next_due(db.connection(), unix_now() + 1)
                 .await
