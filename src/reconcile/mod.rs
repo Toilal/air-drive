@@ -588,6 +588,16 @@ async fn walk_remote(http: &DriveHttp, root_id: &str) -> Result<Vec<RemoteEntry>
     while let Some((parent_id, parent_path)) = queue.pop_front() {
         let children = metadata::list_children(http, &parent_id).await?;
         for c in children {
+            // Reject attacker-controlled names that aren't a single safe path
+            // component (`..`, `a/b`, …) before they're joined into a path the
+            // engine writes under `local_root` — they could otherwise escape it.
+            if !metadata::is_safe_name(&c.name) {
+                tracing::warn!(
+                    name = %c.name,
+                    "skipping remote entry with an unsafe path component"
+                );
+                continue;
+            }
             let rel = if parent_path.is_empty() {
                 c.name.clone()
             } else {
