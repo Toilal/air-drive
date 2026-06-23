@@ -79,6 +79,71 @@ impl Operation {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Typed op payloads
+//
+// Each op's `payload` column is a JSON object. Producing it via raw `json!` in
+// the reconciler and reading it back via `.get("key")` in the dispatcher meant a
+// typo on either side failed silently at runtime. These structs are the single
+// shared schema: the producer serialises one, the consumer deserialises the same
+// type, and a mismatch is a compile error.
+// ---------------------------------------------------------------------------
+
+/// Payload for `RenameLocal` / `RenameRemote`: the item's new path under the root.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RenamePayload {
+    /// New `/`-separated relative path.
+    pub new_relative_path: String,
+}
+
+/// Payload for `DeleteLocal`: whether to keep a tombstone (a remote *trash*, so a
+/// later restore re-links) vs. a permanent removal.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeleteLocalPayload {
+    /// Keep the `sync_item` as a tombstone for a possible restore.
+    pub tombstone: bool,
+}
+
+/// Payload for `Download`: where to fetch from and write to, plus the fingerprint
+/// to record. The dispatcher reads `remote_id` + `relative_path`; `size`/`md5` are
+/// carried for the post-download fingerprint refresh.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DownloadPayload {
+    /// Drive file id to download.
+    pub remote_id: String,
+    /// Expected size in bytes.
+    pub size: i64,
+    /// Expected hex md5.
+    pub md5: String,
+    /// Destination path under the local root.
+    pub relative_path: String,
+}
+
+/// Payload for `WriteShortcut`: the rendered native-Google-Doc pointer body.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShortcutPayload {
+    /// File body to write at the shortcut path.
+    pub content: String,
+}
+
+/// Serialise a typed payload to the JSON string stored in `pending_operation`.
+/// The payload structs are flat and always serialise, so a failure is treated as
+/// an empty payload (which the consumer then rejects with a clear error).
+pub fn encode_payload<T: serde::Serialize>(p: &T) -> String {
+    serde_json::to_string(p).unwrap_or_default()
+}
+
+/// Deserialise an op's stored payload into its typed struct. Errors (missing or
+/// malformed payload) surface as [`crate::error::Error::Mapping`] so the
+/// dispatcher reports them instead of silently no-oping.
+pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &Option<String>) -> Result<T> {
+    let s = payload
+        .as_deref()
+        .ok_or_else(|| crate::error::Error::Mapping("op is missing its payload".into()))?;
+    serde_json::from_str(s)
+        .map_err(|e| crate::error::Error::Mapping(format!("malformed op payload: {e}")))
+}
+
 /// Owned snapshot of a `pending_operation` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingOperation {
