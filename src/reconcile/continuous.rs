@@ -302,6 +302,20 @@ pub async fn apply_remote(
             .clone()
             .unwrap_or_else(|| file.name.clone());
         match items::get_by_remote_id(db.connection(), &change.file_id).await? {
+            None if items::get_by_relative_path(db.connection(), mapping_id, &rel)
+                .await?
+                .is_some() =>
+            {
+                // We already track something at this path but not under this
+                // remote id: it's the echo of a folder WE just created locally,
+                // whose `CreateDirRemote` hasn't linked the remote id yet. Re-
+                // creating it locally would churn / risk a duplicate (#21). The
+                // pending op owns the remote-id link; suppress the echo.
+                tracing::debug!(
+                    relative_path = %rel,
+                    "suppressing echo of locally-created folder (remote id not yet linked)"
+                );
+            }
             None => {
                 // Brand-new folder → persist as kind='dir' and enqueue a local mkdir.
                 let new_id = items::insert(
@@ -489,6 +503,21 @@ pub async fn apply_remote(
                 .relative_path
                 .clone()
                 .unwrap_or_else(|| file.name.clone());
+            // Echo of our own local create: a file we already track at this path
+            // but not yet under this remote id (its `Upload` hasn't linked it).
+            // Re-downloading it would duplicate/churn the freshly-uploaded file
+            // (#21), and inserting a second row at `rel` would hit the unique
+            // index. Suppress; the pending upload op owns the remote-id link.
+            if items::get_by_relative_path(db.connection(), mapping_id, &rel)
+                .await?
+                .is_some()
+            {
+                tracing::debug!(
+                    relative_path = %rel,
+                    "suppressing echo of locally-created file (remote id not yet linked)"
+                );
+                return Ok(());
+            }
             let new_id = items::insert(
                 db.connection(),
                 &NewSyncItem {
@@ -711,6 +740,74 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "no upload should be queued for a shortcut file"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_remote_suppresses_echo_of_locally_created_file() {
+        let (_tmp, db, mapping_id) = setup().await;
+        let in_flight = InFlightOps::new();
+
+        // A local create whose upload hasn't linked the remote id yet: a
+        // `pending_local` row at `newdir/note.txt` with no remote_id.
+        items::insert(
+            db.connection(),
+            &NewSyncItem {
+                mapping_id,
+                relative_path: "newdir/note.txt".into(),
+                kind: ItemKind::File,
+                remote_id: None,
+                size: None,
+                md5: None,
+                local_inode: None,
+                last_synced_at: 0,
+                state: ItemState::PendingLocal,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The change feed reports that file under a FRESH remote id (the echo of
+        // our own upload). It must NOT enqueue a Download or insert a second row
+        // (#21) — the pending upload op owns linking the remote id.
+        let change = RemoteChange {
+            file_id: "remote-new".into(),
+            removed: false,
+            file: Some(FileSnapshot {
+                id: "remote-new".into(),
+                name: "note.txt".into(),
+                mime_type: "text/plain".into(),
+                size: Some(21),
+                md5: Some("babb5939d214eedee9136da7913ee59e".into()),
+                parents: vec!["dir-id".into()],
+                trashed: false,
+            }),
+            relative_path: Some("newdir/note.txt".into()),
+        };
+        apply_remote(
+            change,
+            &db,
+            mapping_id,
+            Path::new("/home/alice"),
+            &in_flight,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            ops::next_due(db.connection(), unix_now() + 1)
+                .await
+                .unwrap()
+                .is_none(),
+            "echo of a locally-created file must not enqueue any op"
+        );
+        let item = items::get_by_relative_path(db.connection(), mapping_id, "newdir/note.txt")
+            .await
+            .unwrap()
+            .expect("the original local item is still tracked");
+        assert!(
+            item.remote_id.is_none(),
+            "the pending upload op owns the remote-id link, not the echo path"
         );
     }
 }

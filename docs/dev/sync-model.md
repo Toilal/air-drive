@@ -68,6 +68,14 @@ The reconciler consults `sync_item` (the per-path record of last-synced size /
 md5 / inode) to recognise a change it caused itself and drop it. The `in_flight`
 tracker (`daemon/in_flight.rs`) covers the window where an op is mid-execution.
 
+One subtlety: a freshly **locally-created** file/folder is uploaded, and its
+`changes.list` echo can arrive *before* the upload op has written the new Drive
+id back onto the `sync_item` (so the by-`remote_id` lookup misses). To avoid
+re-importing our own creation (a duplicate / churn), `apply_remote` also checks
+the resolved path: if a row already exists there, the change is the echo of a
+local create whose remote-id link is still pending, and it is suppressed — the
+upload op owns linking the id.
+
 ## Native Google Docs
 
 Native Google formats (`application/vnd.google-apps.*` — Docs, Sheets, Slides,
