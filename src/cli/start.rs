@@ -326,7 +326,7 @@ async fn ensure_remote_root(
                 "remote root is in the trash"
             );
         }
-        Err(Error::Drive(msg)) if msg.starts_with("HTTP 404") => {
+        Err(Error::DriveHttp { status: 404, .. }) => {
             tracing::warn!(
                 folder_id = %stored_id,
                 "remote root no longer exists on Drive"

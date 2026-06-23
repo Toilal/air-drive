@@ -348,21 +348,33 @@ fn http_error(status: reqwest::StatusCode, body: String) -> Error {
     if status == reqwest::StatusCode::UNAUTHORIZED {
         Error::Oauth(format!("HTTP 401: {body}"))
     } else {
-        Error::Drive(format!("HTTP {status}: {body}"))
+        Error::DriveHttp {
+            status: status.as_u16(),
+            body,
+        }
     }
 }
 
 fn map_reqwest(e: reqwest::Error) -> Error {
-    Error::Drive(format!("network: {e}"))
+    Error::Network(e.to_string())
 }
 
-/// Whether a previous request failure should be retried.
+/// Whether a previous request failure should be retried. Classification is
+/// type-driven (numeric status / variant), not message string-matching:
+///
+/// - any connection-level [`Error::Network`] (the request never got a status);
+/// - `429 Too Many Requests` and all `5xx` server errors (`500`/`502`/`503`/`504`);
+/// - `403` only when Drive's body names a rate-limit reason (`rateLimitExceeded`
+///   / `userRateLimitExceeded`) — a plain 403 (permission denied) is fatal.
 fn is_transient(err: &Error) -> bool {
     match err {
-        Error::Drive(msg) => {
-            msg.starts_with("HTTP 429")
-                || msg.starts_with("HTTP 503")
-                || msg.starts_with("network:")
+        Error::Network(_) => true,
+        Error::DriveHttp { status, body } => {
+            *status == 429
+                || (500..=504).contains(status)
+                || (*status == 403
+                    && (body.contains("rateLimitExceeded")
+                        || body.contains("userRateLimitExceeded")))
         }
         _ => false,
     }
@@ -441,16 +453,27 @@ mod tests {
     }
 
     #[test]
-    fn is_transient_matches_429_503_and_network() {
-        assert!(is_transient(&Error::Drive(
-            "HTTP 429 Too Many Requests".into()
+    fn is_transient_classifies_by_status_not_string() {
+        let http = |status: u16, body: &str| Error::DriveHttp {
+            status,
+            body: body.into(),
+        };
+        // Retry-eligible: 429, all 5xx, network, and 403-with-rate-limit reason.
+        assert!(is_transient(&http(429, "")));
+        assert!(is_transient(&http(500, "")));
+        assert!(is_transient(&http(502, "")));
+        assert!(is_transient(&http(503, "")));
+        assert!(is_transient(&http(504, "")));
+        assert!(is_transient(&Error::Network("connection refused".into())));
+        assert!(is_transient(&http(
+            403,
+            r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#
         )));
-        assert!(is_transient(&Error::Drive("HTTP 503 unavailable".into())));
-        assert!(is_transient(&Error::Drive(
-            "network: connection refused".into()
-        )));
-        assert!(!is_transient(&Error::Drive("HTTP 404 not found".into())));
+        // Fatal: 404, a plain 403 (permission denied), and non-HTTP errors.
+        assert!(!is_transient(&http(404, "not found")));
+        assert!(!is_transient(&http(403, "permission denied")));
         assert!(!is_transient(&Error::Oauth("revoked".into())));
+        assert!(!is_transient(&Error::Drive("missing field".into())));
     }
 
     #[test]
