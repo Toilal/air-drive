@@ -81,7 +81,7 @@ jobs:
         # Wrap in coreutils `timeout` too: kills the test process with a clear exit
         # 124 (SIGTERM, then SIGKILL after 30s) so the failure reads as a timeout
         # rather than the step-level cap silently terminating the whole step.
-        run: timeout --kill-after=30s 15m cargo test --test rclone_drive -- --ignored --nocapture
+        run: timeout --kill-after=30s 15m cargo test --test rclone_drive -- --ignored --nocapture --test-threads=1 e12_local_new_folder
 
       # If the e2e suite fails partway through, the per-run Drive sub-folder may
       # leak. The next successful run sweeps anything older than 24 h
