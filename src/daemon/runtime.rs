@@ -4,8 +4,9 @@
 //! configured [`SyncEngine`]. On success the row is removed; on failure the
 //! dispatcher applies exponential back-off with ±20 % jitter (1 s → 60 s, max
 //! [`MAX_ATTEMPTS`] tries) and reschedules. After [`MAX_ATTEMPTS`] failures the
-//! op is left in place with its `last_error` populated — a future iteration
-//! will surface that as `status: blocked`.
+//! op is parked far in the future ([`PARKED_FOREVER`]) — left in place with its
+//! `last_error` for inspection, but no longer reselected — and an error is
+//! logged; manual resolution is required to revive it.
 //!
 //! The dispatcher loop wakes every [`POLL_INTERVAL`] or whenever a new op is
 //! enqueued via the wake channel (the reconciler signals on enqueue to skip
@@ -76,13 +77,16 @@ pub async fn run(
                 _ = pause.wait_for_resume() => {}
             }
         }
-        // Block when the daemon is in a `state_meta.blocked_kind != NULL`
-        // state. Today no worker auto-clears blocked — recovery happens when
-        // the user re-runs `air-drive link` (which writes a fresh token) and
-        // either restarts the daemon or invokes a follow-up "clear" path
-        // (TODO). Sleeping with a long timeout lets the cancellation token
-        // still propagate cleanly.
-        if meta::get_blocked(db.connection()).await?.is_some() {
+        // Pause only on a TERMINAL block (`auth` → re-link, `remote` → folder
+        // gone, `mapping` → local path gone): those need user action, and the
+        // dispatcher can't make progress past them. A recoverable `transient`
+        // block (the poller couldn't reach Drive) must NOT pause local→remote
+        // work — the ops may succeed, and a successful op clears the transient
+        // block itself. Sleeping with a timeout keeps the cancel token responsive.
+        if matches!(
+            meta::get_blocked(db.connection()).await?,
+            Some(b) if b.kind != BlockedKind::Transient
+        ) {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Ok(()),
@@ -140,9 +144,16 @@ pub async fn run(
                         _ => (0, 0),
                     };
                     if delta_up != 0 || delta_down != 0 {
-                        meta::record_sync_cycle(db.connection(), unix_now(), delta_up, delta_down)
-                            .await
-                            .ok();
+                        if let Err(e) = meta::record_sync_cycle(
+                            db.connection(),
+                            unix_now(),
+                            delta_up,
+                            delta_down,
+                        )
+                        .await
+                        {
+                            tracing::warn!(op_id = op.id.0, error = %e, "failed to record sync cycle");
+                        }
                     }
                     // A completed op proves Drive is reachable again — clear any
                     // recoverable `transient` block the poller left, so recovery
@@ -150,7 +161,11 @@ pub async fn run(
                     if let Ok(true) = meta::clear_if_transient(db.connection()).await {
                         tracing::info!(op_id = op.id.0, "op succeeded — cleared transient block");
                     }
-                    ops::delete(db.connection(), op.id).await.ok();
+                    // If the delete fails the op stays `pending` and would
+                    // re-execute (a duplicate upload/download/rename) — surface it.
+                    if let Err(e) = ops::delete(db.connection(), op.id).await {
+                        tracing::warn!(op_id = op.id.0, error = %e, "failed to delete completed op — it may re-run");
+                    }
                 }
                 Err(Error::Oauth(msg)) => {
                     // OAuth failure: refreshing the access token failed or
@@ -163,17 +178,22 @@ pub async fn run(
                         error = %msg,
                         "auth failure — daemon is now blocked"
                     );
-                    meta::set_blocked(db.connection(), BlockedKind::Auth, &msg, unix_now())
-                        .await
-                        .ok();
-                    ops::mark_attempt(
+                    if let Err(e) =
+                        meta::set_blocked(db.connection(), BlockedKind::Auth, &msg, unix_now())
+                            .await
+                    {
+                        tracing::warn!(op_id = op.id.0, error = %e, "failed to persist auth block");
+                    }
+                    if let Err(e) = ops::mark_attempt(
                         db.connection(),
                         op.id,
                         Some(&format!("blocked: {msg}")),
                         unix_now() + 3600,
                     )
                     .await
-                    .ok();
+                    {
+                        tracing::warn!(op_id = op.id.0, error = %e, "failed to reschedule blocked op");
+                    }
                     break; // exit the drain loop; the outer loop catches blocked
                 }
                 Err(e) => {
@@ -186,9 +206,11 @@ pub async fn run(
                         error = %e,
                         "op failed; will retry"
                     );
-                    ops::mark_attempt(db.connection(), op.id, Some(&e.to_string()), next)
-                        .await
-                        .ok();
+                    if let Err(e) =
+                        ops::mark_attempt(db.connection(), op.id, Some(&e.to_string()), next).await
+                    {
+                        tracing::warn!(op_id = op.id.0, error = %e, "failed to reschedule failed op");
+                    }
                 }
             }
         }

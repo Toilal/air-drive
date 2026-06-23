@@ -18,9 +18,26 @@ pub enum Error {
     #[error("state DB error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
-    /// Google Drive REST API error.
+    /// Google Drive REST API error that isn't tied to an HTTP status (missing
+    /// field, malformed JSON, …).
     #[error("drive API error: {0}")]
     Drive(String),
+
+    /// Google Drive returned a non-success HTTP status. Carrying the numeric
+    /// `status` (and the `reason` Drive puts in the body) lets retry/404
+    /// classification be type-driven instead of string-matching the message.
+    #[error("drive API error: HTTP {status}: {body}")]
+    DriveHttp {
+        /// HTTP status code (e.g. 404, 429, 500, 503).
+        status: u16,
+        /// Response body (Drive's JSON error, kept for the `reason` + diagnostics).
+        body: String,
+    },
+
+    /// Connection-level failure reaching Drive (DNS, TCP, TLS, timeout). Always
+    /// retry-eligible — the request never got a status back.
+    #[error("network error: {0}")]
+    Network(String),
 
     /// OAuth / token error (refresh failure, invalid `client_id`, revoked grant).
     #[error("OAuth error: {0}")]

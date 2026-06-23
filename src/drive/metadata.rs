@@ -144,7 +144,7 @@ pub async fn get_file(http: &DriveHttp, id: &str) -> Result<DriveFileMeta> {
         .await
     {
         Ok(v) => meta_from_json(&v),
-        Err(Error::Drive(msg)) if msg.starts_with("HTTP 404") => {
+        Err(Error::DriveHttp { status: 404, .. }) => {
             Err(Error::Mapping(format!("remote file `{id}` not found")))
         }
         Err(e) => Err(e),
