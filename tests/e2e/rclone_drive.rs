@@ -730,13 +730,12 @@ async fn e11_remote_new_folder_with_file_syncs_locally() {
     fx.cleanup().await;
 }
 
-// NOTE: the symmetric local→remote case (e12 — a folder created locally with a
-// file inside, propagated up by the live daemon) is covered at the mocked level
-// by `us2_11_local_new_dir_with_nested_file_propagates`. It is NOT reinstated as
-// an e2e yet: the `Created(dir)` rescan fixes the deterministic case, but the
-// real-rclone/Drive live path still fails (file not uploaded within the window)
-// for an undiagnosed reason — tracked in #21 (needs daemon-log capture in the
-// e2e harness to investigate).
+// NOTE: the local→remote live new-folder+file case (e12) stays mocked-only
+// (`us2_11`). An isolated e2e trace showed its real failure is that the live
+// inotify watcher never delivers the create events in the e2e environment (no
+// `apply_local` at all) — a watcher-level issue distinct from the echo
+// suppression added here. Tracked in #21; needs watcher instrumentation to
+// investigate, so e12 is not reinstated as an e2e yet.
 
 // ---------------------------------------------------------------------------
 // Helpers
