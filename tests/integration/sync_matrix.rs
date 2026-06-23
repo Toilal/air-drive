@@ -14,11 +14,14 @@
 //! cells need.
 //!
 //! Covers the file lifecycle — **create**, **modify**, **delete** — each across
-//! all four cells (12 tests total), on a shared harness: `converged` /
-//! `converged_with_file` seed the baseline, `remote_create` / `remote_modify` /
-//! `remote_trash` drive the remote side, and `remote_has` / `local_has` /
-//! `remote_gone` assert convergence. Further scenarios (rename, nested dirs)
-//! plug into the same shape.
+//! all four cells (12 tests), plus a **combined** batch (`combined_*`) that
+//! applies all five operation kinds at once — create, modify, delete, file
+//! rename, and folder rename — across the same four cells (4 tests), proving the
+//! operations compose without interfering. Shared harness: `converged` /
+//! `converged_with_file` / `combined_baseline` seed the baseline, `remote_create`
+//! / `remote_modify` / `remote_trash` / `remote_rename` drive the remote side,
+//! and `remote_has` / `local_has` / `remote_gone` / `*_tree_is` assert
+//! convergence.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -258,6 +261,258 @@ async fn delete_remote_startup() {
         daemon.poll_alive()
     );
     daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// combined — every operation at once, across all four cells
+//
+// A single converged baseline is mutated by FIVE operations in one batch:
+//   1. create   new.txt
+//   2. modify   mod.txt
+//   3. delete   del.txt
+//   4. rename   rename-src.txt -> rename-dst.txt   (file rename)
+//   5. rename   sub/            -> sub2/            (folder rename, nested file)
+// plus keep.txt left untouched as a control. Every cell must land on the same
+// final tree (`COMBINED_EXPECTED`), proving the operations compose without
+// interfering — e.g. a rename isn't mistaken for a delete+create, an echo of
+// one op doesn't undo another.
+// ---------------------------------------------------------------------------
+
+/// The tree both sides must converge to after the combined batch.
+const COMBINED_EXPECTED: &[(&str, &[u8])] = &[
+    ("keep.txt", b"keep-untouched"),
+    ("new.txt", b"new-file"),
+    ("mod.txt", b"mod-v1"),
+    ("rename-dst.txt", b"rename-payload"),
+    ("sub2/nested.txt", b"nested-payload"),
+];
+
+#[tokio::test]
+async fn combined_local_live() {
+    let (mock, root_id, fx, _ids) = combined_baseline().await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    apply_local_combined(&fx);
+
+    assert!(
+        wait_until(T, || async {
+            remote_tree_is(&mock, &root_id, COMBINED_EXPECTED)
+        })
+        .await,
+        "local combined batch (live) should converge Drive to the expected tree; \
+         got {:?}; alive? {:?}",
+        remote_tree(&mock, &root_id),
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn combined_local_startup() {
+    let (mock, root_id, fx, _ids) = combined_baseline().await;
+
+    apply_local_combined(&fx);
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    assert!(
+        wait_until(T, || async {
+            remote_tree_is(&mock, &root_id, COMBINED_EXPECTED)
+        })
+        .await,
+        "local combined batch (startup) should converge Drive via the startup scan; \
+         got {:?}; alive? {:?}",
+        remote_tree(&mock, &root_id),
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn combined_remote_live() {
+    let (mock, root_id, fx, ids) = combined_baseline().await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    apply_remote_combined(&mock, &root_id, &ids);
+
+    assert!(
+        wait_until(T, || async { local_tree_is(&fx, COMBINED_EXPECTED) }).await,
+        "remote combined batch (live) should converge local; got {:?}; alive? {:?}",
+        fx.walk_local(),
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn combined_remote_startup() {
+    let (mock, root_id, fx, ids) = combined_baseline().await;
+
+    apply_remote_combined(&mock, &root_id, &ids);
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    assert!(
+        wait_until(T, || async { local_tree_is(&fx, COMBINED_EXPECTED) }).await,
+        "remote combined batch (startup) should converge local via the cursor; \
+         got {:?}; alive? {:?}",
+        fx.walk_local(),
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+/// Drive ids of the baseline entries the combined scenario mutates remotely.
+struct CombinedIds {
+    mod_id: String,
+    del_id: String,
+    rename_id: String,
+    dir_id: String,
+}
+
+/// Seed a converged baseline carrying the six entries the combined batch acts
+/// on: a control file, a file to modify, a file to delete, a file to rename, and
+/// a subfolder (with a nested file) to rename. Returns the mutated entries' ids.
+async fn combined_baseline() -> (DriveMock, String, FsFixture, CombinedIds) {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    let keep_id = mock.insert_file(Some(&root_id), "keep.txt", b"keep-untouched");
+    let mod_id = mock.insert_file(Some(&root_id), "mod.txt", b"mod-v0");
+    let del_id = mock.insert_file(Some(&root_id), "del.txt", b"del-v0");
+    let rename_id = mock.insert_file(Some(&root_id), "rename-src.txt", b"rename-payload");
+    let dir_id = mock.insert_folder(Some(&root_id), "sub");
+    let nested_id = mock.insert_file(Some(&dir_id), "nested.txt", b"nested-payload");
+
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    fx.populate_local(&[
+        ("keep.txt", b"keep-untouched"),
+        ("mod.txt", b"mod-v0"),
+        ("del.txt", b"del-v0"),
+        ("rename-src.txt", b"rename-payload"),
+        ("sub/nested.txt", b"nested-payload"),
+    ]);
+    seed_converged_with_dirs(
+        &fx,
+        &root_id,
+        &[("sub", &dir_id)],
+        &[
+            ("keep.txt", &keep_id, b"keep-untouched"),
+            ("mod.txt", &mod_id, b"mod-v0"),
+            ("del.txt", &del_id, b"del-v0"),
+            ("rename-src.txt", &rename_id, b"rename-payload"),
+            ("sub/nested.txt", &nested_id, b"nested-payload"),
+        ],
+    );
+    (
+        mock,
+        root_id,
+        fx,
+        CombinedIds {
+            mod_id,
+            del_id,
+            rename_id,
+            dir_id,
+        },
+    )
+}
+
+/// Apply the five-operation batch to the local tree (the local-origin cells).
+fn apply_local_combined(fx: &FsFixture) {
+    std::fs::write(fx.local_dir.join("new.txt"), b"new-file").unwrap();
+    std::fs::write(fx.local_dir.join("mod.txt"), b"mod-v1").unwrap();
+    std::fs::remove_file(fx.local_dir.join("del.txt")).unwrap();
+    std::fs::rename(
+        fx.local_dir.join("rename-src.txt"),
+        fx.local_dir.join("rename-dst.txt"),
+    )
+    .unwrap();
+    std::fs::rename(fx.local_dir.join("sub"), fx.local_dir.join("sub2")).unwrap();
+}
+
+/// Apply the five-operation batch to the mock Drive (the remote-origin cells).
+fn apply_remote_combined(mock: &DriveMock, root_id: &str, ids: &CombinedIds) {
+    remote_create(mock, root_id, "new.txt", b"new-file");
+    remote_modify(mock, &ids.mod_id, b"mod-v1");
+    remote_trash(mock, &ids.del_id);
+    remote_rename(mock, &ids.rename_id, "rename-dst.txt");
+    remote_rename(mock, &ids.dir_id, "sub2");
+}
+
+/// Rename a remote file or folder in place (same id, new name) and log the
+/// change, mirroring a Drive `files.update` that only touches the name.
+fn remote_rename(mock: &DriveMock, remote_id: &str, new_name: &str) {
+    let mut st = mock.state.lock().unwrap();
+    if let Some(f) = st.files.get_mut(remote_id) {
+        f.name = new_name.to_owned();
+    }
+    st.change_log.push(ChangeEntry {
+        file_id: remote_id.to_owned(),
+        removed: false,
+    });
+}
+
+/// Snapshot of the remote file tree under `root_id` as sorted `(path, bytes)`,
+/// excluding trashed entries (a propagated delete trashes rather than unlinks).
+fn remote_tree(mock: &DriveMock, root_id: &str) -> Vec<(String, Vec<u8>)> {
+    mock.state
+        .lock()
+        .unwrap()
+        .descendants(root_id)
+        .into_iter()
+        .filter(|(_, f)| !f.trashed)
+        .map(|(p, f)| (p, f.content))
+        .collect()
+}
+
+/// True once the remote tree matches `expected` exactly (as a set).
+fn remote_tree_is(mock: &DriveMock, root_id: &str, expected: &[(&str, &[u8])]) -> bool {
+    tree_eq(&remote_tree(mock, root_id), expected)
+}
+
+/// True once the local tree matches `expected` exactly (as a set).
+fn local_tree_is(fx: &FsFixture, expected: &[(&str, &[u8])]) -> bool {
+    tree_eq(&fx.walk_local(), expected)
+}
+
+/// Order-insensitive equality between an observed `(path, bytes)` tree and the
+/// expected `(path, bytes)` set.
+fn tree_eq(actual: &[(String, Vec<u8>)], expected: &[(&str, &[u8])]) -> bool {
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut a: Vec<(&str, &[u8])> = actual
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let mut e: Vec<(&str, &[u8])> = expected.to_vec();
+    a.sort();
+    e.sort();
+    a == e
+}
+
+/// Seed a converged baseline with files AND directory rows (the latter anchor a
+/// folder rename/move). `dirs` is `(relative_path, remote_id)`; `files` is
+/// `(relative_path, remote_id, content)`. Delegates the account/mapping/cursor
+/// boilerplate to the same SQL as [`seed_converged`].
+fn seed_converged_with_dirs(
+    fx: &FsFixture,
+    root_id: &str,
+    dirs: &[(&str, &str)],
+    files: &[(&str, &str, &[u8])],
+) {
+    seed_converged(fx, root_id, files);
+    let conn = rusqlite::Connection::open(fx.state_db_path()).expect("open state.db");
+    for (rel, remote_id) in dirs {
+        conn.execute(
+            "INSERT INTO sync_item \
+                (mapping_id, relative_path, kind, remote_id, size, md5, local_inode, \
+                 last_synced_at, state) \
+             VALUES (1, ?1, 'dir', ?2, NULL, NULL, NULL, 0, 'synced')",
+            rusqlite::params![rel, remote_id],
+        )
+        .unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------

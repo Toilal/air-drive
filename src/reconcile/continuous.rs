@@ -442,6 +442,47 @@ pub async fn apply_remote(
                 .await?;
                 return Ok(());
             }
+            // Rename / move: the file's resolved path changed. Propagate the move
+            // locally (mirrors the folder + gdoc rename branches) instead of
+            // letting echo suppression swallow a pure rename (same md5). After
+            // our OWN local rename, `RenameRemote` has already updated this row's
+            // path, so the echo resolves to the same path and skips this branch.
+            if let Some(new_rel) = change.relative_path.as_deref()
+                && new_rel != item.relative_path
+            {
+                let payload = json!({ "new_relative_path": new_rel }).to_string();
+                ops::enqueue(
+                    db.connection(),
+                    item.id,
+                    Operation::RenameLocal,
+                    Some(&payload),
+                    unix_now(),
+                )
+                .await?;
+                // Rename + content edit: also pull the new bytes to the new path
+                // (RenameLocal updates the row's path first, so the Download lands
+                // there). A pure rename (unchanged md5) skips the Download.
+                if item.md5.as_deref() != Some(remote_md5.as_str())
+                    || item.size != Some(remote_size)
+                {
+                    let dl = json!({
+                        "remote_id": file.id,
+                        "size": remote_size,
+                        "md5": remote_md5,
+                        "relative_path": new_rel,
+                    })
+                    .to_string();
+                    ops::enqueue(
+                        db.connection(),
+                        item.id,
+                        Operation::Download,
+                        Some(&dl),
+                        unix_now(),
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
             // Echo suppression: same md5 means this is a notification of our
             // own upload — nothing to do.
             if item.md5.as_deref() == Some(remote_md5.as_str()) && item.size == Some(remote_size) {

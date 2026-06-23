@@ -1158,6 +1158,75 @@ async fn us2_11_local_new_dir_with_nested_file_propagates() {
 }
 
 // ---------------------------------------------------------------------------
+// A file renamed on Drive (name change, same content) is renamed locally — the
+// row keeps its remote id and the bytes are moved, not re-downloaded. (Before
+// this, a same-md5 remote change was swallowed as an echo and the rename lost.)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_12_remote_file_rename_propagates_locally() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let content = b"file-rename payload";
+    let file_id = mock.insert_file(Some(&root_id), "old.txt", content);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("old.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(
+        &fx,
+        &mock,
+        &root_id,
+        &[SyncedItem {
+            relative_path: "old.txt",
+            remote_id: &file_id,
+            content,
+        }],
+    );
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Rename the file on Drive (name change, same bytes) + log the change.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.get_mut(&file_id).unwrap().name = "new.txt".to_string();
+        st.change_log.push(common::ChangeEntry {
+            file_id: file_id.clone(),
+            removed: false,
+        });
+    }
+
+    let renamed = wait_until(T_REMOTE_TO_LOCAL, || async {
+        fx.local_dir.join("new.txt").is_file() && !fx.local_dir.join("old.txt").exists()
+    })
+    .await;
+    assert!(
+        renamed,
+        "remote file rename should land locally within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+
+    // The bytes were moved (not re-downloaded), and the row kept its remote id
+    // under the new path.
+    assert_eq!(
+        std::fs::read(fx.local_dir.join("new.txt")).unwrap(),
+        content
+    );
+    with_state_db(&fx, |conn| {
+        let remote: Option<String> = conn
+            .query_row(
+                "SELECT remote_id FROM sync_item WHERE relative_path = 'new.txt'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row rewritten to new.txt");
+        assert_eq!(remote.as_deref(), Some(file_id.as_str()));
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Seeding helpers — applied via sync rusqlite using the production schema.
 // ---------------------------------------------------------------------------
 

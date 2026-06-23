@@ -76,6 +76,15 @@ the resolved path: if a row already exists there, the change is the echo of a
 local create whose remote-id link is still pending, and it is suppressed — the
 upload op owns linking the id.
 
+A pure **remote rename / move** of a regular file (same `remote_id`, unchanged
+md5, but a different resolved path) would otherwise be indistinguishable from an
+echo and dropped. So `apply_remote` checks the resolved path *before* the md5
+echo test: a path change on a known file enqueues a `rename_local` (mirroring the
+folder and gdoc rename branches) rather than a re-download, and a combined
+rename-plus-edit also queues a `download` onto the new path. After our own local
+rename, the `rename_remote` op has already rewritten the row's path, so the
+returning echo resolves to the same path and is correctly suppressed.
+
 ## Native Google Docs
 
 Native Google formats (`application/vnd.google-apps.*` — Docs, Sheets, Slides,
