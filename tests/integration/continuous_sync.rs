@@ -392,6 +392,87 @@ async fn us2_2_remote_modify_propagates_locally() {
 }
 
 // ---------------------------------------------------------------------------
+// A re-delivered remote modify (the change feed hands us the same change again
+// after we already applied it, before the sync_item fingerprint was persisted)
+// must NOT open a spurious conflict: on disk the file already equals the remote.
+// Regression for the false-positive conflict the combined startup matrix flaked
+// on.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us3_3_redelivered_remote_modify_does_not_conflict() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+
+    // Remote AND local already hold the NEW bytes ("v2"), but the sync_item still
+    // remembers the OLD fingerprint ("v1") — exactly the window between a
+    // Download landing on disk and the dispatcher persisting the new md5.
+    let new_bytes = b"v2 -- already applied on disk";
+    let remote_id = mock.insert_file(Some(&root_id), "doc.txt", new_bytes);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("doc.txt", new_bytes)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(
+        &fx,
+        &mock,
+        &root_id,
+        &[SyncedItem {
+            relative_path: "doc.txt",
+            remote_id: &remote_id,
+            content: b"v1 -- stale fingerprint",
+        }],
+    );
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Re-deliver the doc.txt change, plus a sentinel create. Once the sentinel
+    // lands locally we know the poller processed the whole batch (incl. doc.txt).
+    let sentinel_id = mock.insert_file(Some(&root_id), "sentinel.txt", b"sentinel");
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.change_log.push(common::ChangeEntry {
+            file_id: remote_id.clone(),
+            removed: false,
+        });
+        st.change_log.push(common::ChangeEntry {
+            file_id: sentinel_id,
+            removed: false,
+        });
+    }
+
+    let processed = wait_until(T_REMOTE_TO_LOCAL, || async {
+        fx.local_dir.join("sentinel.txt").exists()
+    })
+    .await;
+    assert!(
+        processed,
+        "the poller should process the batch (sentinel arrives); alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // No conflict sibling was created for doc.txt, and its bytes are untouched.
+    let conflict = std::fs::read_dir(&fx.local_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("doc.") && n.contains(".conflict-")
+        });
+    assert!(
+        !conflict,
+        "a re-delivered remote modify whose bytes already match local must not open a conflict"
+    );
+    assert_eq!(
+        std::fs::read(fx.local_dir.join("doc.txt")).unwrap(),
+        new_bytes,
+        "doc.txt content should be untouched"
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // remote delete propagates locally
 // ---------------------------------------------------------------------------
 

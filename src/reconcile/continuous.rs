@@ -488,16 +488,25 @@ pub async fn apply_remote(
             if item.md5.as_deref() == Some(remote_md5.as_str()) && item.size == Some(remote_size) {
                 return Ok(());
             }
-            // Conflict detection: if the local file's CURRENT md5
-            // differs from the last-synced fingerprint, both sides drifted
-            // independently. Open a conflict — rename the local copy, insert
-            // a conflict_record, then proceed with the Download so the remote
-            // version takes the canonical name (Q2: remote keeps canonical).
+            // Conflict detection, by comparing the local file's CURRENT md5 to
+            // both the last-synced fingerprint and the remote md5:
+            //   - local == remote → the on-disk content already matches the
+            //     remote. This is a re-delivery of a change we already applied
+            //     (the change feed can hand us the same entry again before the
+            //     Download's dispatcher has persisted the new fingerprint to
+            //     `sync_item`). Not a conflict and nothing to pull — skip, so we
+            //     don't open a spurious conflict against bytes that already agree.
+            //   - local != last_synced → both sides drifted independently →
+            //     open a conflict (rename the local copy, record it), then fall
+            //     through to the Download so the remote keeps the canonical name
+            //     (Q2: remote keeps canonical).
+            //   - otherwise → local untouched, a pure remote update → Download.
             let canonical_local = local_root.join(&item.relative_path);
             if canonical_local.is_file()
                 && let Some(last_synced_md5) = item.md5.as_deref()
             {
                 match crate::reconcile::fingerprint::compute_local(&canonical_local).await {
+                    Ok((_, local_md5)) if local_md5 == remote_md5 => return Ok(()),
                     Ok((_, local_md5)) if local_md5 != last_synced_md5 => {
                         // Both sides changed since the last sync → conflict.
                         crate::reconcile::conflict::open_conflict(

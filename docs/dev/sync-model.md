@@ -148,6 +148,14 @@ reconciler enqueues `mark_conflict` and records a row in `conflict_record` with
 the original path and a derived `conflict_relative_path` (a renamed sibling), so
 neither edit is lost. Conflicts are surfaced via `air-drive status`.
 
+Detection compares three fingerprints: the local file's **current** md5, the
+**last-synced** md5 (`sync_item`), and the **remote** md5. A conflict is opened
+only when local differs from last-synced *and* from remote. If local already
+equals remote, the two sides agree — this is a re-delivery of a change already
+applied to disk whose `sync_item` fingerprint isn't persisted yet (the change
+feed can hand the same entry back before the `Download` op records the new md5),
+so it is treated as a no-op rather than a spurious conflict.
+
 ## Failure handling and back-off
 
 The dispatcher retries failed operations with exponential back-off: initial 1 s,
