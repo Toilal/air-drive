@@ -22,6 +22,24 @@ use crate::error::{Error, Result};
 /// MIME type Drive uses for folders.
 pub const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 
+/// True when a Drive `name` is safe to use as a **single** local path component.
+///
+/// Drive names are attacker-controlled (anyone who can drop a file into a synced
+/// shared folder picks the name), and the reconciler joins them into the local
+/// `relative_path` it then `local_root.join`s and writes to. A name of `..`,
+/// `/etc/x`, or one embedding a separator would escape the mapped root — an
+/// arbitrary-write primitive. We reject rather than sanitise: a name that can't
+/// be represented as one safe component is skipped (and logged) instead of being
+/// silently rewritten to something the user didn't choose.
+pub fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
 /// Result of [`about_user`] — the linked user's identity.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AboutUser {
@@ -308,6 +326,25 @@ fn strip_query(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_safe_name_accepts_plain_names_and_rejects_traversal() {
+        for ok in ["spec.txt", "My Folder", "réport-2026", ".hidden", "a.b.c"] {
+            assert!(is_safe_name(ok), "{ok:?} should be safe");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "../etc",
+            "/etc/passwd",
+            "a\\b",
+            "x\0y",
+        ] {
+            assert!(!is_safe_name(bad), "{bad:?} should be rejected");
+        }
+    }
 
     #[test]
     fn extract_id_handles_folders_url() {

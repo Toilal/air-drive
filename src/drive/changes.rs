@@ -280,7 +280,7 @@ async fn descendant_path(
             guard.get(&current_id).cloned()
         };
         if let Some(prefix) = cached_prefix {
-            return Some(assemble_path(&prefix, &chain, &file.name, cache).await);
+            return assemble_path(&prefix, &chain, &file.name, cache).await;
         }
 
         // Cache miss — fetch this parent's own (name, parents) and walk further up.
@@ -315,7 +315,19 @@ async fn assemble_path(
     chain: &[(String, String)],
     file_name: &str,
     cache: &Arc<Mutex<HashMap<String, String>>>,
-) -> String {
+) -> Option<String> {
+    // Reject any attacker-controlled name that isn't a single safe path
+    // component before it can escape the mapped root (e.g. `..`, `a/b`). The
+    // cached prefix is trusted: it only ever holds names that passed this gate.
+    if !metadata::is_safe_name(file_name)
+        || chain.iter().any(|(_, name)| !metadata::is_safe_name(name))
+    {
+        tracing::warn!(
+            name = %file_name,
+            "skipping Drive entry whose path contains an unsafe component"
+        );
+        return None;
+    }
     // Build path piece by piece. `chain` is child-first; the final path goes
     // prefix / chain[last].name / chain[last-1].name / ... / chain[0].name / file_name.
     let mut parts: Vec<&str> = Vec::with_capacity(chain.len() + 2);
@@ -341,7 +353,7 @@ async fn assemble_path(
         acc.push_str(name);
         guard.insert(id.clone(), acc.clone());
     }
-    path
+    Some(path)
 }
 
 /// Parse a `file` JSON value from a `changes.list` entry into a [`FileSnapshot`].
@@ -386,6 +398,26 @@ fn parse_snapshot(v: &serde_json::Value) -> Option<FileSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn assemble_path_rejects_unsafe_components() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        // A traversal in the leaf name is refused (no path returned, nothing cached).
+        let chain = vec![("dir-id".to_owned(), "sub".to_owned())];
+        assert_eq!(assemble_path("", &chain, "../escape", &cache).await, None);
+        // A traversal in a walked folder name is refused too.
+        let evil_chain = vec![("dir-id".to_owned(), "..".to_owned())];
+        assert_eq!(assemble_path("", &evil_chain, "ok.txt", &cache).await, None);
+        assert!(
+            cache.lock().await.is_empty(),
+            "nothing unsafe may be cached"
+        );
+        // A clean path assembles and caches normally.
+        assert_eq!(
+            assemble_path("", &chain, "ok.txt", &cache).await,
+            Some("sub/ok.txt".to_owned())
+        );
+    }
 
     #[test]
     fn parse_snapshot_extracts_full_record() {
