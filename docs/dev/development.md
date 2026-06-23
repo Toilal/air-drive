@@ -68,6 +68,12 @@ cargo test --test rclone_drive -- --ignored  # e2e (needs real credentials)
 - Engine integration coverage must include at minimum: a nominal bisync cycle, a
   simple conflict, remote connection loss, and a daemon restart that resumes from
   persisted SQLite state (constitution quality gate #5).
+- `tests/integration/sync_matrix.rs` exercises each sync scenario across the four
+  cells `{local-origin, remote-origin} × {live, startup}` — *live* = the change
+  happens while the daemon runs; *startup* = it happens while stopped and must be
+  recovered on the next start (remote via the cursor, local via the startup
+  scan). The `create` scenario is the worked example; add `modify`/`delete` by
+  the same four-cell shape.
 
 ## Running the daemon locally
 
