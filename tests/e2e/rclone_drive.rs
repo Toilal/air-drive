@@ -730,12 +730,93 @@ async fn e11_remote_new_folder_with_file_syncs_locally() {
     fx.cleanup().await;
 }
 
-// NOTE: the local→remote live new-folder+file case (e12) stays mocked-only
-// (`us2_11`). An isolated e2e trace showed its real failure is that the live
-// inotify watcher never delivers the create events in the e2e environment (no
-// `apply_local` at all) — a watcher-level issue distinct from the echo
-// suppression added here. Tracked in #21; needs watcher instrumentation to
-// investigate, so e12 is not reinstated as an e2e yet.
+// E12 — local→remote live: a brand-new local folder with a nested file created
+// back-to-back, racing the inotify recursive-watch registration (#21). We first
+// wait for the daemon's control socket — bound only after the watcher is
+// attached and initial sync is done — so the test exercises the new-dir race,
+// not the unrelated startup gap before inotify is even live.
+#[tokio::test]
+#[ignore = "e2e: requires real Drive credentials"]
+async fn e12_local_new_folder_with_file_syncs_to_drive() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    seed_account_and_mapping(&fx);
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    // Gate on the LIVE watcher being attached before we test the new-dir race.
+    // There is a sub-second startup gap between "initial reconciliation done"
+    // and "inotify watcher attached"; a file created in that gap is missed live
+    // (recovered only by a later startup scan / safety net). The race we want to
+    // exercise is a *different* one — a file landing inside a brand-new dir
+    // before its recursive watch is registered — so the watcher must already be
+    // attached when we create `newdir`.
+    //
+    // The daemon binds its control socket (`daemon::run` step 6b) only after it
+    // has attached the inotify watcher (step 1) and finished the one-shot initial
+    // reconciliation, so the socket file appearing is a deterministic "watcher is
+    // live" signal — no Drive round-trip, no racing the initial sync.
+    let control_sock = fx.config_dir.join("runtime/control.sock");
+    let watcher_live = common::wait_until(Duration::from_secs(90), || {
+        let p = control_sock.clone();
+        async move { p.exists() }
+    })
+    .await;
+    assert!(
+        watcher_live,
+        "the daemon should bind its control socket (watcher attached) before the new-dir race; \
+         alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Brand-new local folder + nested file, created back-to-back (racing the
+    // recursive-watch registration).
+    let content = b"local nested payload";
+    std::fs::create_dir(fx.local_dir.join("newdir")).expect("create local newdir");
+    std::fs::write(fx.local_dir.join("newdir/note.txt"), content).expect("write local note.txt");
+
+    let synced = common::wait_until(Duration::from_secs(120), || async {
+        let Ok(top) = metadata::list_children(&fx.drive, &fx.run_folder_id).await else {
+            return false;
+        };
+        let Some(dir) = top.iter().find(|c| c.is_folder() && c.name == "newdir") else {
+            return false;
+        };
+        metadata::list_children(&fx.drive, &dir.id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "note.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        synced,
+        "local new folder + nested file should sync to Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    let dir_id = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .find(|c| c.is_folder() && c.name == "newdir")
+        .expect("newdir on Drive")
+        .id;
+    let note = metadata::list_children(&fx.drive, &dir_id)
+        .await
+        .expect("list newdir")
+        .into_iter()
+        .find(|c| c.name == "note.txt")
+        .expect("note.txt on Drive");
+    assert_eq!(
+        note.md5.as_deref(),
+        Some(hex_md5(content).as_str()),
+        "md5 round-trip mismatch for newdir/note.txt"
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
