@@ -45,45 +45,6 @@ pub struct RemoteFile {
     pub md5: Option<String>,
 }
 
-/// Atomic, side-effectful operations the reconciler asks the engine to perform.
-///
-/// Each variant carries every piece of data the engine needs to act without consulting
-/// the state DB. Payloads serialise to JSON in `pending_operation.payload`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Op {
-    /// Push a local file at `local` into Drive under `remote_parent_id` as `name`.
-    Upload {
-        /// Absolute path on the local filesystem.
-        local: std::path::PathBuf,
-        /// Drive ID of the destination folder.
-        remote_parent_id: String,
-        /// File name on Drive (last segment of the relative path).
-        name: String,
-    },
-    /// Fetch a remote file to `local` (the engine must stage to a temporary location
-    /// and atomically rename into place, enforced by `RcloneEngine`).
-    Download {
-        /// Drive file ID to fetch.
-        remote_id: String,
-        /// Final on-disk destination.
-        local: std::path::PathBuf,
-    },
-    /// Move and/or rename a remote file: change its parent folder and/or its name.
-    MoveRemote {
-        /// Drive file ID to move.
-        remote_id: String,
-        /// New parent folder ID. Same as the current one when only renaming.
-        new_parent_id: String,
-        /// New display name.
-        new_name: String,
-    },
-    /// Delete a remote file (Drive trash, not permanent).
-    DeleteRemote {
-        /// Drive file ID to delete.
-        remote_id: String,
-    },
-}
-
 /// One file to fetch in a bootstrap [`SyncEngine::bulk_download`]. Carries both
 /// the Drive id (so an id-addressed engine like [`http::HttpEngine`] can fetch
 /// directly) and the path relative to the remote root (so a path-addressed

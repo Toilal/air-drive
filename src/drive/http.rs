@@ -267,8 +267,10 @@ impl DriveHttp {
 
     async fn with_bearer(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
         let token = self.inner.token_provider.token().await?;
-        let header = HeaderValue::from_str(&format!("Bearer {token}"))
+        let mut header = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|e| Error::Oauth(format!("invalid bearer token: {e}")))?;
+        // Defense in depth: keep the bearer out of any header dump / Debug.
+        header.set_sensitive(true);
         Ok(req.header(AUTHORIZATION, header))
     }
 

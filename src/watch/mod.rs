@@ -197,6 +197,10 @@ fn convert_event(
             }
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            // Sweep stale `From` halves here too, not only when a fresh `From`
+            // arrives — otherwise a lone move-out-of-tree on an otherwise quiet
+            // tree lingers in the buffer past its TTL.
+            evict_stale_renames(pending_renames);
             let from = tracker
                 .and_then(|t| pending_renames.remove(&t))
                 .map(|(p, _)| p);
