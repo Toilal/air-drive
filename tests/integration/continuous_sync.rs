@@ -973,6 +973,78 @@ async fn us2_7_remote_dir_rename_propagates_locally() {
 }
 
 // ---------------------------------------------------------------------------
+// A remote folder rename can surface ONLY as a descendant path-change (Drive
+// delays or omits the folder's own change). The child's parent id is unchanged,
+// so the daemon must recognise the *folder* was renamed and move the whole
+// subtree — not move the child alone (which would strand the empty old dir and
+// re-upload it as a duplicate folder). Regression for the e8/#19 flake.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn us2_7_remote_folder_rename_seen_via_child_change_only() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let docs_id = mock.insert_folder(Some(&root_id), "docs");
+    let content = b"spec payload";
+    let spec_id = mock.insert_file(Some(&docs_id), "spec.txt", content);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("docs/spec.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state_with_dirs(
+        &fx,
+        &mock,
+        &root_id,
+        &[("docs", docs_id.as_str())],
+        &[SyncedItem {
+            relative_path: "docs/spec.txt",
+            remote_id: &spec_id,
+            content,
+        }],
+    );
+
+    let uploads_before = mock.upload_count().await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    // Rename the folder on Drive, then surface ONLY the child's change — drop the
+    // setup change-log so the poller can't also see the folder's own change.
+    {
+        let mut st = mock.state.lock().unwrap();
+        st.files.get_mut(&docs_id).unwrap().name = "documents".to_string();
+        st.change_log.clear();
+        st.change_log.push(common::ChangeEntry {
+            file_id: spec_id.clone(),
+            removed: false,
+        });
+    }
+
+    let renamed = wait_until(T_REMOTE_TO_LOCAL, || async {
+        fx.local_dir.join("documents/spec.txt").is_file() && !fx.local_dir.join("docs").exists()
+    })
+    .await;
+    assert!(
+        renamed,
+        "a folder rename seen only via the child must move the whole dir and drop \
+         the old path within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    let uploads_after = mock.upload_count().await;
+    daemon.shutdown().await;
+    // The subtree move must NOT re-upload anything — that would duplicate the
+    // already-renamed folder on Drive.
+    assert_eq!(
+        uploads_after, uploads_before,
+        "moving the subtree must not trigger an upload (no duplicate folder on Drive)"
+    );
+    assert_eq!(
+        std::fs::read(fx.local_dir.join("documents/spec.txt")).unwrap(),
+        content
+    );
+}
+
+// ---------------------------------------------------------------------------
 // trashing a file then restoring it from Drive's trash re-links to the same row
 // (no duplicate sync_item) and brings the file back at its original path (#8)
 // ---------------------------------------------------------------------------

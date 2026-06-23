@@ -472,6 +472,22 @@ async fn execute(
                 // Already moved (e.g. a retry, or the user did it too) — fall through
                 // to the DB rewrite so state still converges.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // Destination already exists and is non-empty: under a Drive
+                // eventual-consistency cascade a child can be downloaded into the
+                // *new* path before this rename runs (#19), so a plain rename
+                // would `ENOTEMPTY` forever. Merge the source subtree into the
+                // destination and drop the emptied source instead — the op then
+                // converges. `AlreadyExists` covers backends that report EEXIST.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                        || e.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    let (src, dst) = (old_local.clone(), new_local.clone());
+                    tokio::task::spawn_blocking(move || merge_move_dir(&src, &dst))
+                        .await
+                        .map_err(|e| Error::Mapping(format!("merge_move_dir join: {e}")))?
+                        .map_err(Error::Io)?;
+                }
                 Err(e) => return Err(Error::Io(e)),
             }
             items::rename_subtree(db.connection(), item.mapping_id, &old_rel, new_rel).await?;
@@ -566,6 +582,33 @@ fn split_parent(rel: &str) -> (&str, &str) {
     }
 }
 
+/// Move every entry of `src` into `dst` (which already exists), recursing into
+/// subdirectories that exist on both sides, then remove the emptied `src`. Used
+/// when a directory `RenameLocal` finds its destination already populated — a
+/// file having been downloaded into the new path before the rename ran, under a
+/// Drive eventual-consistency cascade (#19). A plain `fs::rename` `ENOTEMPTY`s
+/// there; merging converges instead. Overwriting a file with the byte-identical
+/// copy that already arrived is harmless (same Drive object).
+///
+/// Synchronous (`std::fs`) so it can recurse without boxing; the caller runs it
+/// on a blocking thread.
+fn merge_move_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() && to.is_dir() {
+            merge_move_dir(&from, &to)?;
+        } else {
+            // File / symlink, or a directory whose destination doesn't exist yet:
+            // a plain rename moves it (overwriting a destination file).
+            std::fs::rename(&from, &to)?;
+        }
+    }
+    std::fs::remove_dir(src)
+}
+
 fn parse_payload(s: &Option<String>) -> Value {
     s.as_deref()
         .and_then(|x| serde_json::from_str(x).ok())
@@ -603,5 +646,29 @@ mod tests {
         assert_eq!(split_parent("a.txt"), ("", "a.txt"));
         assert_eq!(split_parent("dir/a.txt"), ("dir", "a.txt"));
         assert_eq!(split_parent("a/b/c.txt"), ("a/b", "c.txt"));
+    }
+
+    #[test]
+    fn merge_move_dir_merges_into_existing_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("docs");
+        let dst = tmp.path().join("documents");
+        // Source subtree (the pre-rename local copy).
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("spec.txt"), b"payload").unwrap();
+        std::fs::write(src.join("sub/nested.txt"), b"nested").unwrap();
+        // Destination already exists with a byte-identical overlapping file — the
+        // child the cascade downloaded into the new path before the rename ran.
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("spec.txt"), b"payload").unwrap();
+
+        merge_move_dir(&src, &dst).unwrap();
+
+        assert!(!src.exists(), "emptied source dir must be removed");
+        assert_eq!(std::fs::read(dst.join("spec.txt")).unwrap(), b"payload");
+        assert_eq!(
+            std::fs::read(dst.join("sub/nested.txt")).unwrap(),
+            b"nested"
+        );
     }
 }
