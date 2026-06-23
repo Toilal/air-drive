@@ -20,12 +20,13 @@ pub mod fingerprint;
 pub mod shortcut;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use globset::GlobSet;
 
+use crate::config::SymlinkPolicy;
 use crate::drive::http::DriveHttp;
 use crate::drive::metadata;
 use crate::engine::{BulkDownload, BulkUpload, SyncEngine};
@@ -35,7 +36,7 @@ use crate::state::cursor;
 use crate::state::items::{self, ItemKind, ItemState, NewSyncItem, SyncItem};
 use crate::state::mapping::MappingId;
 use crate::state::unix_now;
-use crate::watch::WatchEvent;
+use crate::watch::{LocalKind, WatchEvent, classify_local};
 
 /// How many times to retry the targeted lookup of an uploaded file the
 /// post-sync remote walk didn't see yet (Drive eventual consistency).
@@ -71,6 +72,7 @@ struct RemoteEntry {
 /// Run the initial reconciliation. Caller passes the engine wrapped in `Arc<dyn …>`
 /// so swapping rclone for the HTTP engine at the binary level is a no-op for the
 /// reconciler.
+#[allow(clippy::too_many_arguments)] // wiring collaborators by name is clearer than a struct
 pub async fn initial(
     http: &DriveHttp,
     engine: Arc<dyn SyncEngine>,
@@ -79,10 +81,11 @@ pub async fn initial(
     local_root: &Path,
     remote_root_id: &str,
     ignore_patterns: &[String],
+    symlinks: SymlinkPolicy,
 ) -> Result<()> {
     let ignore = crate::watch::build_ignore_matcher(ignore_patterns)?;
 
-    let local_entries = walk_local(local_root)?;
+    let local_entries = walk_local(local_root, symlinks)?;
     let remote_entries = walk_remote(http, remote_root_id).await?;
 
     let local_files: Vec<&LocalEntry> = local_entries.iter().filter(|e| !e.is_dir).collect();
@@ -381,9 +384,10 @@ pub async fn startup_local_scan(
     mapping_id: MappingId,
     local_root: &Path,
     ignore_patterns: &[String],
+    symlinks: SymlinkPolicy,
 ) -> Result<usize> {
     let ignore = crate::watch::build_ignore_matcher(ignore_patterns)?;
-    let local_entries = walk_local(local_root)?;
+    let local_entries = walk_local(local_root, symlinks)?;
     let local_file_paths: HashSet<&str> = local_entries
         .iter()
         .filter(|e| !e.is_dir)
@@ -405,8 +409,14 @@ pub async fn startup_local_scan(
             // A directory we don't track yet → propagate its creation (empty
             // dirs included). A known dir needs nothing.
             if existing.is_none() {
-                continuous::apply_local(WatchEvent::Created(abs), db, mapping_id, local_root)
-                    .await?;
+                continuous::apply_local(
+                    WatchEvent::Created(abs),
+                    db,
+                    mapping_id,
+                    local_root,
+                    symlinks,
+                )
+                .await?;
                 replayed += 1;
             }
             continue;
@@ -423,8 +433,14 @@ pub async fn startup_local_scan(
                 let changed_locally =
                     item.md5.as_deref() != Some(md5.as_str()) || item.size != Some(size);
                 if changed_locally && remote_matches_synced(http, &item).await {
-                    continuous::apply_local(WatchEvent::Modified(abs), db, mapping_id, local_root)
-                        .await?;
+                    continuous::apply_local(
+                        WatchEvent::Modified(abs),
+                        db,
+                        mapping_id,
+                        local_root,
+                        symlinks,
+                    )
+                    .await?;
                     replayed += 1;
                 } else if changed_locally {
                     tracing::info!(
@@ -435,8 +451,14 @@ pub async fn startup_local_scan(
             }
             // Brand-new local file created while the daemon was down.
             None => {
-                continuous::apply_local(WatchEvent::Created(abs), db, mapping_id, local_root)
-                    .await?;
+                continuous::apply_local(
+                    WatchEvent::Created(abs),
+                    db,
+                    mapping_id,
+                    local_root,
+                    symlinks,
+                )
+                .await?;
                 replayed += 1;
             }
         }
@@ -461,7 +483,14 @@ pub async fn startup_local_scan(
             continue;
         }
         let abs = local_root.join(&item.relative_path);
-        continuous::apply_local(WatchEvent::Deleted(abs), db, mapping_id, local_root).await?;
+        continuous::apply_local(
+            WatchEvent::Deleted(abs),
+            db,
+            mapping_id,
+            local_root,
+            symlinks,
+        )
+        .await?;
         replayed += 1;
     }
 
@@ -483,15 +512,23 @@ async fn remote_matches_synced(http: &DriveHttp, item: &SyncItem) -> bool {
 }
 
 /// Walk the local tree, returning every file and directory beneath `root` (excluding
-/// the root itself and any `.air-drive-partial/` staging artefacts).
-fn walk_local(root: &Path) -> Result<Vec<LocalEntry>> {
+/// the root itself and any `.air-drive-partial/` staging artefacts). `policy`
+/// decides how symlinks are treated ([`classify_local`]).
+fn walk_local(root: &Path, policy: SymlinkPolicy) -> Result<Vec<LocalEntry>> {
     let mut out = Vec::new();
-    collect_local(root, root, &mut out)?;
+    let mut visited = HashSet::new();
+    collect_local(root, root, policy, &mut visited, &mut out)?;
     out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(out)
 }
 
-fn collect_local(root: &Path, dir: &Path, out: &mut Vec<LocalEntry>) -> Result<()> {
+fn collect_local(
+    root: &Path,
+    dir: &Path,
+    policy: SymlinkPolicy,
+    visited: &mut HashSet<PathBuf>,
+    out: &mut Vec<LocalEntry>,
+) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -504,20 +541,37 @@ fn collect_local(root: &Path, dir: &Path, out: &mut Vec<LocalEntry>) -> Result<(
             .map_err(|e| Error::Mapping(format!("strip_prefix: {e}")))?
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
-            out.push(LocalEntry {
-                relative_path: rel.clone(),
-                is_dir: true,
-            });
-            collect_local(root, &path, out)?;
-        } else if metadata.is_file() {
-            out.push(LocalEntry {
-                relative_path: rel,
-                is_dir: false,
-            });
+        match classify_local(&path, root, policy) {
+            Some(LocalKind::Dir) => {
+                out.push(LocalEntry {
+                    relative_path: rel.clone(),
+                    is_dir: true,
+                });
+                // Loop guard: when following symlinks, a directory link can point
+                // back into the tree and cycle. Descend into each canonical dir
+                // at most once. In `Skip` mode no link is followed, so there is
+                // no cycle and we descend unconditionally (no canonicalize cost).
+                let descend = match policy {
+                    SymlinkPolicy::Follow => match std::fs::canonicalize(&path) {
+                        Ok(canon) => visited.insert(canon),
+                        Err(_) => false,
+                    },
+                    SymlinkPolicy::Skip => true,
+                };
+                if descend {
+                    collect_local(root, &path, policy, visited, out)?;
+                }
+            }
+            Some(LocalKind::File) => {
+                out.push(LocalEntry {
+                    relative_path: rel,
+                    is_dir: false,
+                });
+            }
+            // Symlink under Skip, escaping/broken link under Follow, or a special
+            // file — skipped.
+            None => {}
         }
-        // Symlinks and special files: skipped silently.
     }
     Ok(())
 }
@@ -702,7 +756,7 @@ mod tests {
         let partial = tmp.path().join(crate::engine::staging::PARTIAL_DIR);
         std::fs::create_dir_all(&partial).unwrap();
         std::fs::write(partial.join("op-1"), b"stale").unwrap();
-        let entries = walk_local(tmp.path()).unwrap();
+        let entries = walk_local(tmp.path(), SymlinkPolicy::Skip).unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
         assert!(names.contains(&"real.txt"));
         assert!(
@@ -719,7 +773,7 @@ mod tests {
         let nested = tmp.path().join("a/b/c");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("leaf.txt"), b"L").unwrap();
-        let entries = walk_local(tmp.path()).unwrap();
+        let entries = walk_local(tmp.path(), SymlinkPolicy::Skip).unwrap();
         let paths: Vec<&str> = entries.iter().map(|e| e.relative_path.as_str()).collect();
         assert!(paths.contains(&"a/b/c/leaf.txt"), "got {paths:?}");
     }

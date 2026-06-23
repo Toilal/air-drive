@@ -873,6 +873,16 @@ impl FsFixture {
         std::fs::write(self.config_dir.join("config.toml"), toml).unwrap();
     }
 
+    /// Like [`write_default_config`](Self::write_default_config) but pins
+    /// `[watch].symlinks` to `policy` (`"skip"` or `"follow"`) for the symlink
+    /// handling tests.
+    pub fn write_config_with_symlinks(&self, policy: &str) {
+        let toml = format!(
+            "[oauth]\n\n[mapping]\n\n[daemon]\n\n[rclone]\n\n[watch]\nsymlinks = \"{policy}\"\n"
+        );
+        std::fs::write(self.config_dir.join("config.toml"), toml).unwrap();
+    }
+
     /// Write a no-op `tokens.json` with `0600` perms so the OAuth-permission preflight
     /// passes. Real auth still goes through the test bearer override.
     pub fn write_token_file(&self) {

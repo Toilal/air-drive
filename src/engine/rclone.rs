@@ -235,6 +235,10 @@ impl RcloneEngine {
     fn add_bulk_flags(cmd: &mut Command, files_from: &Path) {
         cmd.arg("--files-from")
             .arg(files_from)
+            // Follow symlinks so a `[watch].symlinks = follow` tree uploads link
+            // targets' bytes during the initial bulk copy. Harmless when the
+            // `--files-from` set contains no links (the `skip` default).
+            .arg("--copy-links")
             .arg("--transfers")
             .arg("8")
             .arg("--checkers")
@@ -290,6 +294,11 @@ impl SyncEngine for RcloneEngine {
         let mut cmd = self.base_command().await?;
         cmd.arg("copyto")
             .arg(local)
+            // Follow symlinks so a `[watch].symlinks = follow` source uploads the
+            // target's bytes. A no-op for regular files, and the watcher / walker
+            // only ever hand us paths it already decided to sync, so this never
+            // pulls in a link we meant to skip.
+            .arg("--copy-links")
             .arg(format!("{REMOTE_NAME}:{name}"))
             .arg("--drive-root-folder-id")
             .arg(remote_parent_id);
@@ -331,6 +340,8 @@ impl SyncEngine for RcloneEngine {
         let mut cmd = self.base_command().await?;
         cmd.arg("copyto")
             .arg(local)
+            // Follow symlinks (see `upload`) so a followed symlink's edits propagate.
+            .arg("--copy-links")
             .arg(format!("{REMOTE_NAME}:{name}"))
             .arg("--drive-root-folder-id")
             .arg(&parent_id);

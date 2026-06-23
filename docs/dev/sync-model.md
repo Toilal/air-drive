@@ -17,6 +17,14 @@ Files whose **name** matches any `[watch].ignore_patterns` glob are dropped at
 this stage: no upload, no rename propagation, no delete propagation. See
 [configuration](../user/configuration.md#default-ignore-patterns).
 
+Symlinks are classified by `watch::classify_local` according to the
+`[watch].symlinks` policy — the single source of truth shared by the live
+watcher filter and the `reconcile` tree walkers. Under `skip` (default) a
+symlink is ignored; under `follow` it is resolved to its target (a file or
+directory), with two guards: a link whose target resolves **outside** the
+watched root is skipped, and directory-symlink cycles are broken by tracking
+visited canonical paths. See [configuration](../user/configuration.md#symlinks).
+
 When a **new directory** is created, a file dropped into it can land before
 `notify` registers the recursive watch on the new subdir, so the file's own
 event is never delivered. To avoid silently missing it, `apply_local`'s
