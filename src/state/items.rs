@@ -296,10 +296,27 @@ pub async fn rename_subtree(
             // `path` is either exactly `old` or starts with `old/`; splitting at
             // `old.len()` is a valid char boundary since `old` is a prefix.
             let new_path = format!("{}{}", new, &path[old.len()..]);
-            tx.execute(
-                "UPDATE sync_item SET relative_path = ?1 WHERE id = ?2",
-                params![new_path, id],
+            // Collision: a row already lives at the destination. Under a Drive
+            // eventual-consistency cascade (#19) a child can be imported at the
+            // *new* path (carrying the correct remote_id) before this rename
+            // runs, so renaming the stale source row onto it would hit the unique
+            // index on (mapping_id, relative_path). The already-applied target row
+            // wins — drop the source row instead, so the move converges rather
+            // than wedging the queue.
+            let collisions: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sync_item \
+                 WHERE mapping_id = ?1 AND relative_path = ?2 AND id != ?3",
+                params![mapping_id.0, new_path, id],
+                |r| r.get(0),
             )?;
+            if collisions > 0 {
+                tx.execute("DELETE FROM sync_item WHERE id = ?1", params![id])?;
+            } else {
+                tx.execute(
+                    "UPDATE sync_item SET relative_path = ?1 WHERE id = ?2",
+                    params![new_path, id],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -650,6 +667,50 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_subtree_dedupes_on_destination_collision() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let conn = db.connection();
+        // Pre-rename rows plus a child already imported at the NEW path — the
+        // eventual-consistency cascade of #19: `documents/spec.txt` exists before
+        // the `docs -> documents` rename runs.
+        for p in ["docs", "docs/spec.txt", "documents/spec.txt"] {
+            insert(conn, &sample(mapping_id, p)).await.unwrap();
+        }
+
+        // Must converge, not trip the unique (mapping_id, relative_path) index.
+        rename_subtree(conn, mapping_id, "docs", "documents")
+            .await
+            .unwrap();
+
+        // The already-applied target row survives; the stale source rows are gone.
+        assert!(
+            get_by_relative_path(conn, mapping_id, "documents/spec.txt")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            get_by_relative_path(conn, mapping_id, "docs/spec.txt")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_by_relative_path(conn, mapping_id, "documents")
+                .await
+                .unwrap()
+                .is_some(),
+            "the renamed directory row should land at the new prefix"
+        );
+        assert!(
+            get_by_relative_path(conn, mapping_id, "docs")
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

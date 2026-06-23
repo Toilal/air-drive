@@ -93,6 +93,29 @@ rename-plus-edit also queues a `download` onto the new path. After our own local
 rename, the `rename_remote` op has already rewritten the row's path, so the
 returning echo resolves to the same path and is correctly suppressed.
 
+### Folder rename vs file move
+
+A file's resolved path can change for two reasons, and they need opposite
+handling. Before treating a path change as a per-file rename, `apply_remote`
+compares the change's **parent id** to the directory it tracks at the file's old
+parent path:
+
+- **Same parent id** → the *folder* was renamed in place (the child keeps its
+  parent, only the name changed). Drive may deliver only the child's change, or
+  deliver it before the folder's own change. Moving the child alone would strand
+  the emptied old directory and let the watcher re-upload it as a duplicate
+  folder. So the daemon enqueues the `rename_local` for the **directory** — an
+  idempotent subtree move that carries every child and removes the old path.
+- **Different parent id** → a genuine move into another folder → per-file
+  `rename_local`.
+
+When a directory `rename_local` finds its destination already populated (a child
+downloaded into the new path first, under an eventual-consistency cascade), it
+**merges** the source subtree into the destination and drops the emptied source
+instead of failing with `ENOTEMPTY`; the DB rewrite drops the stale source row
+on a path collision. Together these make a remote folder rename converge however
+Drive orders or splits the underlying change events (issue #19).
+
 ## Native Google Docs
 
 Native Google formats (`application/vnd.google-apps.*` — Docs, Sheets, Slides,

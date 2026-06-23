@@ -478,6 +478,39 @@ pub async fn apply_remote(
             if let Some(new_rel) = change.relative_path.as_deref()
                 && new_rel != item.relative_path
             {
+                // Distinguish a parent-folder rename from a genuine file move.
+                // When a folder is renamed in place on Drive its children keep
+                // the same parent id but their resolved path changes, and Drive
+                // may deliver only the child's change (or deliver it before the
+                // folder's). Moving the child on its own would strand the emptied
+                // old directory and make the local watcher re-upload it as a brand
+                // new folder (#19). So if the file's current parent id still
+                // matches the directory we track at its OLD parent path, the
+                // *directory* was renamed: enqueue the subtree rename for that
+                // directory instead. It is idempotent across siblings and carries
+                // every child, so the old directory is removed rather than left
+                // behind. A genuine move (parent id differs) falls through to the
+                // per-file rename below.
+                let old_parent = parent_dir(&item.relative_path);
+                let new_parent = parent_dir(new_rel);
+                if old_parent != new_parent
+                    && !old_parent.is_empty()
+                    && let Some(parent_id) = file.parents.first()
+                    && let Some(dir) =
+                        items::get_by_relative_path(db.connection(), mapping_id, old_parent).await?
+                    && dir.remote_id.as_deref() == Some(parent_id.as_str())
+                {
+                    let payload = json!({ "new_relative_path": new_parent }).to_string();
+                    ops::enqueue(
+                        db.connection(),
+                        dir.id,
+                        Operation::RenameLocal,
+                        Some(&payload),
+                        unix_now(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 let payload = json!({ "new_relative_path": new_rel }).to_string();
                 ops::enqueue(
                     db.connection(),
@@ -653,6 +686,12 @@ fn strip_root(absolute: &Path, root: &Path) -> Result<String> {
     Ok(rel
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
+/// The parent-directory portion of a `/`-separated relative path, or `""` for a
+/// root-level entry (`"a/b/c.txt"` → `"a/b"`, `"c.txt"` → `""`).
+fn parent_dir(rel: &str) -> &str {
+    rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("")
 }
 
 #[cfg(test)]
