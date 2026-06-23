@@ -13,9 +13,12 @@
 //! exactly the "daemon was running before, now restarted" baseline the startup
 //! cells need.
 //!
-//! This file is the harness + the `create` scenario as the worked example;
-//! `modify` / `delete` extend by the same four-cell shape, reusing
-//! [`converged`], [`remote_create`]-style actors, and the `*_has` assertions.
+//! Covers the file lifecycle — **create**, **modify**, **delete** — each across
+//! all four cells (12 tests total), on a shared harness: `converged` /
+//! `converged_with_file` seed the baseline, `remote_create` / `remote_modify` /
+//! `remote_trash` drive the remote side, and `remote_has` / `local_has` /
+//! `remote_gone` assert convergence. Further scenarios (rename, nested dirs)
+//! plug into the same shape.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -23,7 +26,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{ChangeEntry, DaemonProcess, DriveMock, FsFixture, fs_fixture, wait_until};
+use common::{ChangeEntry, DaemonProcess, DriveMock, FsFixture, fs_fixture, hex_md5, wait_until};
 
 /// Generous convergence budget — these poll the mocked Drive REST API.
 const T: Duration = Duration::from_secs(30);
@@ -113,6 +116,151 @@ async fn create_remote_startup() {
 }
 
 // ---------------------------------------------------------------------------
+// modify — local-origin
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn modify_local_live() {
+    let (mock, root_id, fx, _id) = converged_with_file("m.txt", b"v0").await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    std::fs::write(fx.local_dir.join("m.txt"), b"v1-local-live").unwrap();
+
+    assert!(
+        wait_until(T, || async {
+            remote_has(&mock, &root_id, "m.txt", b"v1-local-live")
+        })
+        .await,
+        "local modify (live) should update Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn modify_local_startup() {
+    let (mock, root_id, fx, _id) = converged_with_file("m.txt", b"v0").await;
+
+    std::fs::write(fx.local_dir.join("m.txt"), b"v1-local-startup").unwrap();
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    assert!(
+        wait_until(T, || async {
+            remote_has(&mock, &root_id, "m.txt", b"v1-local-startup")
+        })
+        .await,
+        "local modify (startup) should update Drive via the startup scan; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// modify — remote-origin
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn modify_remote_live() {
+    let (mock, _root_id, fx, id) = converged_with_file("m.txt", b"v0").await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    remote_modify(&mock, &id, b"v1-remote-live");
+
+    assert!(
+        wait_until(T, || async { local_has(&fx, "m.txt", b"v1-remote-live") }).await,
+        "remote modify (live) should update local; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn modify_remote_startup() {
+    let (mock, _root_id, fx, id) = converged_with_file("m.txt", b"v0").await;
+
+    remote_modify(&mock, &id, b"v1-remote-startup");
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    assert!(
+        wait_until(T, || async {
+            local_has(&fx, "m.txt", b"v1-remote-startup")
+        })
+        .await,
+        "remote modify (startup) should update local; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// delete — local-origin
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_local_live() {
+    let (mock, _root_id, fx, id) = converged_with_file("d.txt", b"bye").await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    std::fs::remove_file(fx.local_dir.join("d.txt")).unwrap();
+
+    assert!(
+        wait_until(T, || async { remote_gone(&mock, &id) }).await,
+        "local delete (live) should remove the remote file; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn delete_local_startup() {
+    let (mock, _root_id, fx, id) = converged_with_file("d.txt", b"bye").await;
+
+    std::fs::remove_file(fx.local_dir.join("d.txt")).unwrap();
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    assert!(
+        wait_until(T, || async { remote_gone(&mock, &id) }).await,
+        "local delete (startup) should remove the remote file via the startup scan; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// delete — remote-origin
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_remote_live() {
+    let (mock, _root_id, fx, id) = converged_with_file("d.txt", b"bye").await;
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    remote_trash(&mock, &id);
+
+    assert!(
+        wait_until(T, || async { !fx.local_dir.join("d.txt").exists() }).await,
+        "remote trash (live) should remove the local file; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn delete_remote_startup() {
+    let (mock, _root_id, fx, id) = converged_with_file("d.txt", b"bye").await;
+
+    remote_trash(&mock, &id);
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+
+    assert!(
+        wait_until(T, || async { !fx.local_dir.join("d.txt").exists() }).await,
+        "remote trash (startup) should remove the local file; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
@@ -124,8 +272,56 @@ async fn converged() -> (DriveMock, String, FsFixture) {
     let fx = fs_fixture();
     fx.write_default_config();
     fx.write_token_file();
-    seed_converged(&fx, &root_id);
+    seed_converged(&fx, &root_id, &[]);
     (mock, root_id, fx)
+}
+
+/// Like [`converged`] but with a single top-level file already synced on both
+/// sides (local copy + Drive copy + a `synced` row). Returns its Drive id so
+/// `modify` / `delete` scenarios can mutate the remote side. `rel` is a plain
+/// file name (top-level).
+async fn converged_with_file(rel: &str, content: &[u8]) -> (DriveMock, String, FsFixture, String) {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let remote_id = mock.insert_file(Some(&root_id), rel, content);
+    let fx = fs_fixture();
+    fx.write_default_config();
+    fx.write_token_file();
+    fx.populate_local(&[(rel, content)]);
+    seed_converged(&fx, &root_id, &[(rel, &remote_id, content)]);
+    (mock, root_id, fx, remote_id)
+}
+
+/// Replace a remote file's bytes and log the change (a remote-side edit).
+fn remote_modify(mock: &DriveMock, remote_id: &str, new_content: &[u8]) {
+    let mut st = mock.state.lock().unwrap();
+    if let Some(f) = st.files.get_mut(remote_id) {
+        f.content = new_content.to_vec();
+        f.md5 = hex_md5(new_content);
+    }
+    st.change_log.push(ChangeEntry {
+        file_id: remote_id.to_owned(),
+        removed: false,
+    });
+}
+
+/// Trash a remote file and log the change (a remote-side delete; Drive surfaces
+/// a trash as a normal change with `trashed = true`).
+fn remote_trash(mock: &DriveMock, remote_id: &str) {
+    let mut st = mock.state.lock().unwrap();
+    if let Some(f) = st.files.get_mut(remote_id) {
+        f.trashed = true;
+    }
+    st.change_log.push(ChangeEntry {
+        file_id: remote_id.to_owned(),
+        removed: false,
+    });
+}
+
+/// True once the remote file `remote_id` is gone (a propagated local delete
+/// trashes it via the Drive API, dropping it from the mock's file map).
+fn remote_gone(mock: &DriveMock, remote_id: &str) -> bool {
+    !mock.state.lock().unwrap().files.contains_key(remote_id)
 }
 
 /// Create a file on the mock Drive AND log it in the change feed, so a polling
@@ -156,8 +352,10 @@ fn local_has(fx: &FsFixture, rel: &str, content: &[u8]) -> bool {
 }
 
 /// Seed account + mapping + a `'0'` change cursor so the daemon treats the
-/// mapping as already initialised (no first-time reconciliation on start).
-fn seed_converged(fx: &FsFixture, root_id: &str) {
+/// mapping as already initialised (no first-time reconciliation on start), plus
+/// a `synced` `sync_item` row for each `(relative_path, remote_id, content)` —
+/// the already-converged files the `modify` / `delete` scenarios act on.
+fn seed_converged(fx: &FsFixture, root_id: &str, files: &[(&str, &str, &[u8])]) {
     let conn = rusqlite::Connection::open(fx.state_db_path()).expect("open state.db");
     conn.execute_batch(air_drive::state::schema::BOOTSTRAP)
         .expect("bootstrap schema_version");
@@ -198,4 +396,14 @@ fn seed_converged(fx: &FsFixture, root_id: &str) {
         [],
     )
     .unwrap();
+    for (rel, remote_id, content) in files {
+        conn.execute(
+            "INSERT INTO sync_item \
+                (mapping_id, relative_path, kind, remote_id, size, md5, local_inode, \
+                 last_synced_at, state) \
+             VALUES (1, ?1, 'file', ?2, ?3, ?4, NULL, 0, 'synced')",
+            rusqlite::params![rel, remote_id, content.len() as i64, hex_md5(content)],
+        )
+        .unwrap();
+    }
 }
