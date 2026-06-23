@@ -13,7 +13,7 @@
 //! `specs/001-minimal-sync-daemon/data-model.md`.
 
 /// Latest schema version this binary knows how to apply.
-pub const LATEST_VERSION: i64 = 5;
+pub const LATEST_VERSION: i64 = 6;
 
 /// Unconditional bootstrap: ensures `schema_version` exists so the migration runner can
 /// always read it. Idempotent.
@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
 /// Forward-only migrations. Index `i` is the SQL block to apply when moving from schema
 /// version `i` to `i+1`. The bootstrap step above already created `schema_version` so
 /// migrations only carry the **schema additions** of their version.
-pub const MIGRATIONS: &[&str] = &[V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA, V5_SCHEMA];
+pub const MIGRATIONS: &[&str] = &[
+    V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA, V5_SCHEMA, V6_SCHEMA,
+];
 
 const V1_SCHEMA: &str = r#"
 -- linked Google Drive account (single row in MVP, id=1)
@@ -163,6 +165,30 @@ ALTER TABLE pending_operation_v5 RENAME TO pending_operation;
 
 CREATE INDEX pending_operation_next_attempt
     ON pending_operation(next_attempt_at);
+"#;
+
+/// v6 — extend `state_meta.blocked_kind` with the recoverable `transient` kind
+/// (Drive briefly unreachable; cleared on the next successful call). SQLite can't
+/// alter a CHECK constraint in place, so the singleton table is rebuilt with the
+/// widened set and its one row copied across. Nothing foreign-key-references it.
+const V6_SCHEMA: &str = r#"
+CREATE TABLE state_meta_v6 (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    blocked_kind     TEXT CHECK (blocked_kind IN ('auth', 'remote', 'mapping', 'transient')),
+    blocked_message  TEXT,
+    blocked_at       INTEGER,
+    last_sync_at     INTEGER,
+    items_uploaded   INTEGER NOT NULL DEFAULT 0,
+    items_downloaded INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO state_meta_v6
+    (id, blocked_kind, blocked_message, blocked_at, last_sync_at, items_uploaded, items_downloaded)
+SELECT id, blocked_kind, blocked_message, blocked_at, last_sync_at, items_uploaded, items_downloaded
+FROM state_meta;
+
+DROP TABLE state_meta;
+ALTER TABLE state_meta_v6 RENAME TO state_meta;
 "#;
 
 /// v3 — persist the original `<remote-folder>` CLI spec on the mapping row.

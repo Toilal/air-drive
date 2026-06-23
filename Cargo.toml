@@ -149,6 +149,10 @@ name = "relink"
 path = "tests/integration/relink.rs"
 
 [[test]]
+name = "recovery"
+path = "tests/integration/recovery.rs"
+
+[[test]]
 name = "setup_uninstall_service"
 path = "tests/integration/setup_uninstall_service.rs"
 

@@ -154,6 +154,7 @@ pub async fn collect(db: &Db, pid: Option<u32>) -> Result<Value> {
                     BlockedKind::Auth => "auth",
                     BlockedKind::Remote => "remote",
                     BlockedKind::Mapping => "mapping",
+                    BlockedKind::Transient => "transient",
                 },
             }),
             None => Value::Null,
