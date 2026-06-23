@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
-use serde_json::Value;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -326,18 +325,10 @@ async fn execute(
         }
 
         Operation::Download => {
-            let payload = parse_payload(&op.payload);
-            let remote_id = payload
-                .get("remote_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::Mapping("Download op missing remote_id".into()))?;
-            let rel = payload
-                .get("relative_path")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| item.relative_path.clone());
-
-            let local = local_root.join(&rel);
+            let dl: ops::DownloadPayload = ops::decode_payload(&op.payload)?;
+            let remote_id = dl.remote_id.as_str();
+            let rel = dl.relative_path.as_str();
+            let local = local_root.join(rel);
             if let Some(parent) = local.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     if e.kind() == std::io::ErrorKind::StorageFull {
@@ -392,10 +383,7 @@ async fn execute(
             // original path, avoiding a duplicate — #8), false for a permanent
             // delete / loss of access (drop the row). Directories are never
             // tombstoned regardless.
-            let tombstone = parse_payload(&op.payload)
-                .get("tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let tombstone = ops::decode_payload::<ops::DeleteLocalPayload>(&op.payload)?.tombstone;
             if tombstone && matches!(item.kind, items::ItemKind::File) {
                 items::mark_trashed(db.connection(), item.id, unix_now()).await?;
             } else {
@@ -430,23 +418,14 @@ async fn execute(
             // the rendered JSON body in the payload; we just write it where the
             // shortcut lives. The item keeps `state = skipped` so the local watcher
             // never tries to upload the pointer, and `status` surfaces it.
-            let body = parse_payload(&op.payload)
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-                .ok_or_else(|| Error::Mapping("WriteShortcut op missing content".into()))?;
+            let body = ops::decode_payload::<ops::ShortcutPayload>(&op.payload)?.content;
             let local = local_root.join(&item.relative_path);
             crate::reconcile::shortcut::write(&local, &body).await?;
         }
 
         Operation::RenameRemote => {
-            let payload = parse_payload(&op.payload);
-            let new_rel = payload
-                .get("new_relative_path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    Error::Mapping("RenameRemote op missing new_relative_path".into())
-                })?;
+            let payload: ops::RenamePayload = ops::decode_payload(&op.payload)?;
+            let new_rel = payload.new_relative_path.as_str();
             let Some(rid) = &item.remote_id else {
                 // Renamed before the first upload landed — drop op, the
                 // create-with-the-new-path will be picked up on the next walk.
@@ -488,11 +467,8 @@ async fn execute(
         }
 
         Operation::RenameLocal => {
-            let payload = parse_payload(&op.payload);
-            let new_rel = payload
-                .get("new_relative_path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| Error::Mapping("RenameLocal op missing new_relative_path".into()))?;
+            let payload: ops::RenamePayload = ops::decode_payload(&op.payload)?;
+            let new_rel = payload.new_relative_path.as_str();
             let old_rel = item.relative_path.clone();
             let old_local = local_root.join(&old_rel);
             let new_local = local_root.join(new_rel);
@@ -640,12 +616,6 @@ fn merge_move_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resu
         }
     }
     std::fs::remove_dir(src)
-}
-
-fn parse_payload(s: &Option<String>) -> Value {
-    s.as_deref()
-        .and_then(|x| serde_json::from_str(x).ok())
-        .unwrap_or(Value::Null)
 }
 
 /// Exponential backoff with jitter. `attempt` is 1-indexed: 1, 2, 4, 8, ... s.

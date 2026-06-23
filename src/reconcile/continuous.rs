@@ -14,8 +14,6 @@
 
 use std::path::Path;
 
-use serde_json::json;
-
 use crate::config::SymlinkPolicy;
 use crate::daemon::in_flight::InFlightOps;
 use crate::drive::changes::RemoteChange;
@@ -117,7 +115,9 @@ pub async fn apply_local(
                     .await?;
                 }
                 Some(item) => {
-                    let payload = json!({ "new_relative_path": to_rel }).to_string();
+                    let payload = ops::encode_payload(&ops::RenamePayload {
+                        new_relative_path: to_rel.to_string(),
+                    });
                     ops::enqueue(
                         db.connection(),
                         item.id,
@@ -300,7 +300,7 @@ pub async fn apply_remote(
         // good, so remove the local copy and drop the row — no tombstone, since
         // there's nothing to restore.
         if let Some(item) = items::get_by_remote_id(db.connection(), &change.file_id).await? {
-            let payload = json!({ "tombstone": false }).to_string();
+            let payload = ops::encode_payload(&ops::DeleteLocalPayload { tombstone: false });
             ops::enqueue(
                 db.connection(),
                 item.id,
@@ -325,7 +325,7 @@ pub async fn apply_remote(
         if let Some(item) = items::get_by_remote_id(db.connection(), &change.file_id).await? {
             if item.trashed_at.is_none() {
                 let tombstone = matches!(item.kind, ItemKind::File);
-                let payload = json!({ "tombstone": tombstone }).to_string();
+                let payload = ops::encode_payload(&ops::DeleteLocalPayload { tombstone });
                 ops::enqueue(
                     db.connection(),
                     item.id,
@@ -390,7 +390,9 @@ pub async fn apply_remote(
                 // Known folder whose path changed on Drive → renamed or moved.
                 // Propagate locally; the descendants follow on disk and are
                 // rewritten in the DB by the dispatcher (no per-child events).
-                let payload = json!({ "new_relative_path": rel }).to_string();
+                let payload = ops::encode_payload(&ops::RenamePayload {
+                    new_relative_path: rel.to_string(),
+                });
                 ops::enqueue(
                     db.connection(),
                     existing.id,
@@ -436,7 +438,9 @@ pub async fn apply_remote(
             }
             Some(existing) if existing.relative_path != rel => {
                 // The doc was renamed on Drive → rename the local shortcut to match.
-                let payload = json!({ "new_relative_path": rel }).to_string();
+                let payload = ops::encode_payload(&ops::RenamePayload {
+                    new_relative_path: rel.to_string(),
+                });
                 ops::enqueue(
                     db.connection(),
                     existing.id,
@@ -469,13 +473,12 @@ pub async fn apply_remote(
             // a restore usually carries the same md5 the row still remembers.
             if item.trashed_at.is_some() {
                 items::clear_trashed(db.connection(), item.id).await?;
-                let payload = json!({
-                    "remote_id": file.id,
-                    "size": remote_size,
-                    "md5": remote_md5,
-                    "relative_path": item.relative_path,
-                })
-                .to_string();
+                let payload = ops::encode_payload(&ops::DownloadPayload {
+                    remote_id: file.id.clone(),
+                    size: remote_size,
+                    md5: remote_md5.clone(),
+                    relative_path: item.relative_path.to_string(),
+                });
                 ops::enqueue(
                     db.connection(),
                     item.id,
@@ -516,7 +519,9 @@ pub async fn apply_remote(
                         items::get_by_relative_path(db.connection(), mapping_id, old_parent).await?
                     && dir.remote_id.as_deref() == Some(parent_id.as_str())
                 {
-                    let payload = json!({ "new_relative_path": new_parent }).to_string();
+                    let payload = ops::encode_payload(&ops::RenamePayload {
+                        new_relative_path: new_parent.to_string(),
+                    });
                     ops::enqueue(
                         db.connection(),
                         dir.id,
@@ -527,7 +532,9 @@ pub async fn apply_remote(
                     .await?;
                     return Ok(());
                 }
-                let payload = json!({ "new_relative_path": new_rel }).to_string();
+                let payload = ops::encode_payload(&ops::RenamePayload {
+                    new_relative_path: new_rel.to_string(),
+                });
                 ops::enqueue(
                     db.connection(),
                     item.id,
@@ -542,13 +549,12 @@ pub async fn apply_remote(
                 if item.md5.as_deref() != Some(remote_md5.as_str())
                     || item.size != Some(remote_size)
                 {
-                    let dl = json!({
-                        "remote_id": file.id,
-                        "size": remote_size,
-                        "md5": remote_md5,
-                        "relative_path": new_rel,
-                    })
-                    .to_string();
+                    let dl = ops::encode_payload(&ops::DownloadPayload {
+                        remote_id: file.id.clone(),
+                        size: remote_size,
+                        md5: remote_md5.clone(),
+                        relative_path: new_rel.to_string(),
+                    });
                     ops::enqueue(
                         db.connection(),
                         item.id,
@@ -605,13 +611,12 @@ pub async fn apply_remote(
                 }
             }
             // Real divergence — enqueue a Download to pull the new content.
-            let payload = json!({
-                "remote_id": file.id,
-                "size": remote_size,
-                "md5": remote_md5,
-                "relative_path": item.relative_path,
-            })
-            .to_string();
+            let payload = ops::encode_payload(&ops::DownloadPayload {
+                remote_id: file.id.clone(),
+                size: remote_size,
+                md5: remote_md5.clone(),
+                relative_path: item.relative_path.to_string(),
+            });
             ops::enqueue(
                 db.connection(),
                 item.id,
@@ -660,13 +665,12 @@ pub async fn apply_remote(
                 },
             )
             .await?;
-            let payload = json!({
-                "remote_id": file.id,
-                "size": remote_size,
-                "md5": remote_md5,
-                "relative_path": rel,
-            })
-            .to_string();
+            let payload = ops::encode_payload(&ops::DownloadPayload {
+                remote_id: file.id.clone(),
+                size: remote_size,
+                md5: remote_md5.clone(),
+                relative_path: rel.to_string(),
+            });
             ops::enqueue(
                 db.connection(),
                 new_id,
@@ -683,7 +687,9 @@ pub async fn apply_remote(
 /// Enqueue a [`Operation::WriteShortcut`] for a native Google Doc, rendering the
 /// pointer body into the op payload so the dispatcher only has to write bytes.
 async fn enqueue_write_shortcut(db: &Db, item_id: ItemId, mime: &str, id: &str) -> Result<()> {
-    let payload = json!({ "content": shortcut::content(mime, id) }).to_string();
+    let payload = ops::encode_payload(&ops::ShortcutPayload {
+        content: shortcut::content(mime, id),
+    });
     ops::enqueue(
         db.connection(),
         item_id,
