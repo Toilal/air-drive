@@ -165,20 +165,42 @@ pub async fn get_file_raw(http: &DriveHttp, id: &str, fields: &str) -> Result<Va
 /// set. Callers that only need id/name/mime simply ignore the extra `Option` fields.
 pub async fn list_children(http: &DriveHttp, parent_id: &str) -> Result<Vec<DriveFileMeta>> {
     let q = format!("'{parent_id}' in parents and trashed = false");
-    let body = http
-        .get_json(
-            "files",
-            &[
-                ("q", q.as_str()),
-                ("fields", "files(id,name,mimeType,size,md5Checksum)"),
-            ],
-        )
-        .await?;
-    let arr = body
-        .get("files")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::Drive("files.list response missing `files`".into()))?;
-    arr.iter().map(meta_from_json).collect()
+    let mut out = Vec::new();
+    let mut page_token: Option<String> = None;
+    // Drive caps a page at 1000 items; a folder with more children spans several
+    // pages. Follow `nextPageToken` to the end — a single un-paginated request
+    // would silently truncate the child set and make the daemon miss files or
+    // create duplicate folders.
+    loop {
+        let mut query: Vec<(&str, &str)> = vec![
+            ("q", q.as_str()),
+            (
+                "fields",
+                "nextPageToken,files(id,name,mimeType,size,md5Checksum)",
+            ),
+            ("pageSize", "1000"),
+        ];
+        if let Some(token) = &page_token {
+            query.push(("pageToken", token.as_str()));
+        }
+        let body = http.get_json("files", &query).await?;
+        drop(query); // end the borrow of `page_token` before reassigning it below
+        let arr = body
+            .get("files")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error::Drive("files.list response missing `files`".into()))?;
+        for v in arr {
+            out.push(meta_from_json(v)?);
+        }
+        page_token = body
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
+        if page_token.is_none() {
+            return Ok(out);
+        }
+    }
 }
 
 /// Drive file root identifier. Drive treats the user's My Drive root as a special
@@ -326,6 +348,44 @@ fn strip_query(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn list_children_follows_next_page_token() {
+        use crate::drive::auth::StaticToken;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // First page: a file + nextPageToken (no pageToken in the request yet).
+        Mock::given(method("GET"))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "nextPageToken": "p2",
+                "files": [{ "id": "f1", "name": "a.txt", "mimeType": "text/plain" }],
+            })))
+            .mount(&server)
+            .await;
+        // Second page (pageToken=p2): another file, no nextPageToken → stop.
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::query_param("pageToken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "files": [{ "id": "f2", "name": "b.txt", "mimeType": "text/plain" }],
+            })))
+            .mount(&server)
+            .await;
+
+        let http = DriveHttp::with_bases(
+            Arc::new(StaticToken::new("t")),
+            format!("{}/drive/v3", server.uri()),
+            format!("{}/upload/drive/v3", server.uri()),
+        )
+        .unwrap();
+
+        let children = list_children(&http, "parent").await.unwrap();
+        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["a.txt", "b.txt"], "both pages must be returned");
+    }
 
     #[test]
     fn is_safe_name_accepts_plain_names_and_rejects_traversal() {

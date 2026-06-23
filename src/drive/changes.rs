@@ -1,10 +1,12 @@
 //! Drive `changes.list` poller.
 //!
-//! Long-lived task that wakes every `interval` seconds, fetches the delta since
-//! the last cursor, filters to descendants of the watched root, and emits
-//! [`RemoteChange`] events on a tokio mpsc channel. The new
-//! `newStartPageToken` is persisted to `drive_change_cursor` after every page
-//! so a crash mid-loop doesn't replay events on restart.
+//! Long-lived task that wakes every `interval` seconds, drains the full delta
+//! since the last cursor (following `nextPageToken` across pages), filters to
+//! descendants of the watched root, and emits [`RemoteChange`] events on a tokio
+//! mpsc channel. The `newStartPageToken` (emitted by Drive only on the final
+//! page) is persisted to `drive_change_cursor` once the whole delta is drained,
+//! so a crash mid-tick re-fetches from the old cursor rather than skipping
+//! changes.
 //!
 //! Descendant filtering uses a small in-memory cache (`known_descendant_ids`)
 //! seeded with the mapped root. On a cache miss the poller walks the file's
@@ -112,19 +114,10 @@ pub async fn run(
             continue;
         };
 
-        let body = match http
-            .get_json(
-                "changes",
-                &[
-                    ("pageToken", token.as_str()),
-                    (
-                        "fields",
-                        "newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,md5Checksum,parents,trashed))",
-                    ),
-                ],
-            )
-            .await
-        {
+        // Drain every page of the delta in this tick. `newStartPageToken` only
+        // appears on the LAST page; a multi-page burst that stopped after one
+        // page would re-fetch the same first page forever and never advance.
+        let (changes, new_token) = match fetch_changes_since(&http, &token).await {
             Ok(v) => v,
             Err(crate::error::Error::Oauth(msg)) => {
                 // OAuth refresh / 401 — persist the blocked flag so the
@@ -167,18 +160,6 @@ pub async fn run(
             Ok(false) => {}
             Err(e) => tracing::warn!(error = %e, "failed to clear transient block"),
         }
-
-        let new_token = body
-            .get("newStartPageToken")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .unwrap_or(token.clone());
-
-        let changes = body
-            .get("changes")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
 
         for c in changes {
             let file_id = c
@@ -260,6 +241,52 @@ pub async fn run(
 /// reuse the cached path without re-walking. The cache lock is held only
 /// while reading or mutating the map — every HTTP call happens between lock
 /// releases, so the poller never blocks other tasks on network I/O.
+/// Fetch the full change delta since `start_token`, following `nextPageToken`
+/// across pages. Returns the accumulated raw change entries plus the
+/// `newStartPageToken` to persist — which Drive only emits on the final page, so
+/// the caller must not advance the cursor until the whole delta is drained.
+async fn fetch_changes_since(
+    http: &DriveHttp,
+    start_token: &str,
+) -> Result<(Vec<serde_json::Value>, String)> {
+    let mut page_token = start_token.to_owned();
+    let mut changes = Vec::new();
+    loop {
+        let body = http
+            .get_json(
+                "changes",
+                &[
+                    ("pageToken", page_token.as_str()),
+                    ("pageSize", "1000"),
+                    (
+                        "fields",
+                        "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,md5Checksum,parents,trashed))",
+                    ),
+                ],
+            )
+            .await?;
+        if let Some(arr) = body.get("changes").and_then(|v| v.as_array()) {
+            changes.extend(arr.iter().cloned());
+        }
+        if let Some(next) = body
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty())
+        {
+            page_token = next.to_owned();
+            continue;
+        }
+        // Last page: `newStartPageToken` is the cursor for the next tick. Fall
+        // back to the token we just used if (unexpectedly) absent.
+        let new_start = body
+            .get("newStartPageToken")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or(page_token);
+        return Ok((changes, new_start));
+    }
+}
+
 async fn descendant_path(
     http: &DriveHttp,
     file: &FileSnapshot,
@@ -398,6 +425,49 @@ fn parse_snapshot(v: &serde_json::Value) -> Option<FileSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fetch_changes_since_follows_next_page_token() {
+        use crate::drive::auth::StaticToken;
+        use wiremock::matchers::{method, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Page 1 (pageToken=start): one change + a nextPageToken, NO newStartPageToken.
+        Mock::given(method("GET"))
+            .and(query_param("pageToken", "start"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "nextPageToken": "p2",
+                "changes": [{ "fileId": "a", "removed": false }],
+            })))
+            .mount(&server)
+            .await;
+        // Page 2 (pageToken=p2): the last page — newStartPageToken, no nextPageToken.
+        Mock::given(method("GET"))
+            .and(query_param("pageToken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "newStartPageToken": "final",
+                "changes": [{ "fileId": "b", "removed": false }],
+            })))
+            .mount(&server)
+            .await;
+
+        let http = DriveHttp::with_bases(
+            Arc::new(StaticToken::new("t")),
+            format!("{}/drive/v3", server.uri()),
+            format!("{}/upload/drive/v3", server.uri()),
+        )
+        .unwrap();
+
+        let (changes, new_token) = fetch_changes_since(&http, "start").await.unwrap();
+        assert_eq!(changes.len(), 2, "both pages must be accumulated");
+        assert_eq!(changes[0]["fileId"], "a");
+        assert_eq!(changes[1]["fileId"], "b");
+        assert_eq!(
+            new_token, "final",
+            "cursor must be the last page's newStartPageToken"
+        );
+    }
 
     #[tokio::test]
     async fn assemble_path_rejects_unsafe_components() {
