@@ -31,6 +31,13 @@ pub const MIGRATIONS: &[&str] = &[
     V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA, V5_SCHEMA, V6_SCHEMA,
 ];
 
+// `LATEST_VERSION` must equal the number of migrations: the runner derives each
+// step's version as `idx + 1` and refuses to open a DB newer than
+// `LATEST_VERSION`. Adding a migration without bumping the constant would let the
+// migration apply, then lock the daemon out on the next open. Catch it at compile
+// time.
+const _: () = assert!(MIGRATIONS.len() == LATEST_VERSION as usize);
+
 const V1_SCHEMA: &str = r#"
 -- linked Google Drive account (single row in MVP, id=1)
 CREATE TABLE account (
