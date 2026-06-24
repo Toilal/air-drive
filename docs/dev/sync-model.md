@@ -87,6 +87,16 @@ deleted echo that later returns from `changes.list` is dropped by the `in_flight
 tracker, which is consulted before both the `removed` and `trashed` branches of
 `apply_remote`.
 
+**Files the user doesn't own.** Trashing a file requires ownership, so
+propagating a local delete of a merely-shared file fails with `403
+insufficientFilePermissions`. That error is permanent (never retried). The
+dispatcher falls back to **"Remove from My Drive"** — a `files.update` clearing
+the file's parents, which unlinks it from the user's tree (the owner keeps their
+copy), matching the local deletion. If even that is refused (e.g. the file lives
+in a folder the user doesn't own), the dispatcher gives up gracefully: it marks
+the `sync_item` `skipped` so neither side re-syncs it and logs an actionable
+warning, rather than looping on a delete that can never succeed.
+
 ## Echo suppression
 
 When air-drive uploads a file, Drive's `changes.list` will later report that

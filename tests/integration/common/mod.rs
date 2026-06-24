@@ -68,6 +68,15 @@ pub struct DriveFile {
     /// Mirrors Drive's `trashed` flag. A trashed file stays in `files` (a trash
     /// is reversible) but `changes.list` surfaces it with `trashed = true`.
     pub trashed: bool,
+    /// Whether the authenticated test user owns this file. When `false`, a
+    /// trash (`PATCH trashed=true`) or `DELETE` returns `403
+    /// insufficientFilePermissions`, mirroring Drive's behaviour for a file
+    /// merely shared with the user. Defaults to `true`.
+    pub owned: bool,
+    /// Whether the user may remove this file from their own folders
+    /// (`removeParents`). `false` models a file living in a folder the user does
+    /// not own, where even "Remove from My Drive" is refused. Defaults to `true`.
+    pub removable: bool,
 }
 
 impl DriveFile {
@@ -124,6 +133,8 @@ impl DriveState {
                 content: Vec::new(),
                 md5: String::new(),
                 trashed: false,
+                owned: true,
+                removable: true,
             },
         );
         self.change_log.push(ChangeEntry {
@@ -148,6 +159,8 @@ impl DriveState {
                 content,
                 md5,
                 trashed: false,
+                owned: true,
+                removable: true,
             },
         );
         self.change_log.push(ChangeEntry {
@@ -177,6 +190,8 @@ impl DriveState {
                 content,
                 md5,
                 trashed: false,
+                owned: true,
+                removable: true,
             },
         );
         self.change_log.push(ChangeEntry {
@@ -443,6 +458,19 @@ impl DriveMock {
             .insert_file(parent, name, content.to_vec())
     }
 
+    /// Mark a file as not owned by the test user: trashing or deleting it now
+    /// returns `403 insufficientFilePermissions`, like a file merely shared with
+    /// them. When `removable` is `false`, "Remove from My Drive"
+    /// (`removeParents`) is refused too — modelling a file inside a folder the
+    /// user does not own.
+    pub fn set_unowned(&self, id: &str, removable: bool) {
+        let mut st = self.state.lock().unwrap();
+        if let Some(f) = st.files.get_mut(id) {
+            f.owned = false;
+            f.removable = removable;
+        }
+    }
+
     /// Count of `files.create` (multipart upload) calls observed so far.
     pub async fn upload_count(&self) -> usize {
         self.server
@@ -671,6 +699,19 @@ impl Respond for FilePatchResponder {
         let Some(f) = st.files.get_mut(&id) else {
             return ResponseTemplate::new(404);
         };
+
+        let wants_trash = body.get("trashed").and_then(Value::as_bool) == Some(true);
+        let wants_remove_parents = req.url.query_pairs().any(|(k, _)| k == "removeParents");
+        // Permission gates mirroring Drive for files the user doesn't own: a
+        // trash needs ownership; "Remove from My Drive" needs control of the
+        // containing folder.
+        if wants_trash && !f.owned {
+            return insufficient_file_permissions();
+        }
+        if wants_remove_parents && !f.removable {
+            return insufficient_file_permissions();
+        }
+
         if let Some(new_name) = body.get("name").and_then(Value::as_str) {
             f.name = new_name.to_owned();
         }
@@ -681,10 +722,17 @@ impl Respond for FilePatchResponder {
             f.trashed = trashed;
         }
         // `addParents` / `removeParents` come as query params, comma-separated.
+        let has_add_parents = req.url.query_pairs().any(|(k, _)| k == "addParents");
         if let Some((_, parents)) = req.url.query_pairs().find(|(k, _)| k == "addParents") {
             if let Some(p) = parents.split(',').next() {
                 f.parent_id = Some(p.to_owned());
             }
+        }
+        // A *pure* `removeParents` (no `addParents`) is "Remove from My Drive":
+        // clear the parent, unlinking the file (the mock tracks a single
+        // parent). A move sends both and must keep the new parent set above.
+        if wants_remove_parents && !has_add_parents {
+            f.parent_id = None;
         }
         let clone = f.clone();
         st.change_log.push(ChangeEntry {
@@ -700,16 +748,37 @@ impl Respond for FileDeleteResponder {
     fn respond(&self, req: &Request) -> ResponseTemplate {
         let id = last_path_segment(req.url.path());
         let mut st = self.0.lock().unwrap();
-        if st.files.remove(&id).is_some() {
-            st.change_log.push(ChangeEntry {
-                file_id: id,
-                removed: true,
-            });
-            ResponseTemplate::new(204)
-        } else {
-            ResponseTemplate::new(404)
+        match st.files.get(&id) {
+            None => ResponseTemplate::new(404),
+            // Not the owner: Drive refuses a permanent delete just like a trash.
+            Some(f) if !f.owned => insufficient_file_permissions(),
+            Some(_) => {
+                st.files.remove(&id);
+                st.change_log.push(ChangeEntry {
+                    file_id: id,
+                    removed: true,
+                });
+                ResponseTemplate::new(204)
+            }
         }
     }
+}
+
+/// Drive's `403` for a mutation the user lacks permission for (e.g. trashing a
+/// file they don't own), body shaped like the real API so the daemon's
+/// `Error::is_insufficient_permissions` classifier matches.
+fn insufficient_file_permissions() -> ResponseTemplate {
+    ResponseTemplate::new(403).set_body_json(json!({
+        "error": {
+            "code": 403,
+            "message": "The user does not have sufficient permissions for this file.",
+            "errors": [{
+                "message": "The user does not have sufficient permissions for this file.",
+                "domain": "global",
+                "reason": "insufficientFilePermissions"
+            }]
+        }
+    }))
 }
 
 struct StartPageTokenResponder(Arc<Mutex<DriveState>>);
