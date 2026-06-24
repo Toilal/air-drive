@@ -25,6 +25,13 @@ Package each platform's bundle with the daemon, the UI
 include its MIT copyright notice and license text, and all third-party licenses
 MUST be listed in a `THIRD_PARTY_LICENSES` file.
 
+On Linux, bundle the **native Nautilus extension** here (carried over from
+[150 — desktop shell integration](150-desktop-shell-integration.md)): a C `.so`
+built against `libnautilus-extension-4`, installed into the *system* extensions
+dir by the package, dropping the `python3-nautilus` runtime dependency the
+user-dir Python extension needs. The Python extension stays the non-packaged
+fallback.
+
 ## Acceptance
 
 - Installable AppImage / `.app` / Windows installer that run with no manual
