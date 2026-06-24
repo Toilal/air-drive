@@ -152,6 +152,36 @@ air-drive init [--force] [--link]
 - `--force` — overwrite an existing `[oauth].client_id`.
 - `--link` — run `air-drive link` immediately after writing the config.
 
+### `shell`
+
+Manage desktop shell integration: a per-file sync-status emblem in the file
+manager. Today this targets **GNOME Files (Nautilus)** on Linux (the Ubuntu/GNOME
+default); other desktops report "not yet supported" rather than half-installing.
+
+```sh
+air-drive shell install [--skip-deps]
+air-drive shell uninstall
+air-drive shell status
+```
+
+- `install` — detects the platform and file manager, ensures the
+  `python3-nautilus` bridge is present (installing it via the host package
+  manager when run on a terminal, or printing the exact command otherwise), and
+  deploys the extension to
+  `~/.local/share/nautilus-python/extensions/air-drive-overlay.py`. Fully restart
+  the file manager to load it — `killall nautilus` (a plain `nautilus -q` can
+  leave a cached background instance), or log out and back in.
+  - `--skip-deps` — deploy the extension only; don't try to install
+    `python3-nautilus` (use when you manage packages yourself).
+- `uninstall` — remove the deployed extension (idempotent). Leaves the shared
+  `python3-nautilus` system package installed.
+- `status` — report what's detected (platform, file manager, dependency,
+  extension) without changing anything.
+
+The extension reads each file's status from the running daemon over its control
+socket and paints an emblem: synced, syncing/pending, or conflict. With no daemon
+running (or a file outside the mapping) it shows no emblem.
+
 ## Exit codes
 
 | Code | Name                    | Meaning                                                        |
