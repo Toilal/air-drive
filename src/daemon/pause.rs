@@ -7,15 +7,16 @@
 //!   `wait_for_resume()` to sleep cooperatively when paused. Clones share
 //!   the same underlying flag.
 //! - [`run_control_server`] — accepts connections on
-//!   `<runtime_dir>/control.sock` and handles: `pause`, `resume`,
-//!   `status-snapshot`, `status-path <abs>` and `status-dir <abs>` (per-file and
-//!   bulk-per-directory sync status for the desktop overlay, see
-//!   [`crate::daemon::file_status`]), and `subscribe`. The status/pause commands
-//!   are request/response (`status-dir` writes one `<token>\t<name>` line per
-//!   child, then closes); `subscribe` is a long-lived stream that emits
+//!   `<runtime_dir>/control.sock`. Commands: `pause`, `resume`, `pause-state`
+//!   (`paused`/`running`, for the menu toggle), `status-snapshot`,
+//!   `status-path <abs>` and `status-dir <abs>` (per-file and bulk-per-directory
+//!   sync status for the overlay), `drive-url <abs>` (the Drive browser URL for
+//!   a path, for the "Open in Drive" menu action), and `subscribe`. All but
+//!   `subscribe` are request/response (`status-dir` writes one `<token>\t<name>`
+//!   line per child, then closes); `subscribe` is a long-lived stream that emits
 //!   `changed\n` on every sync activity so the overlay refreshes emblems live.
-//!   UNIX-only by design — the project is Linux-first per constitution
-//!   principle V.
+//!   See [`crate::daemon::file_status`]. UNIX-only by design — the project is
+//!   Linux-first per constitution principle V.
 //!
 //! Graceful shutdown is NOT a control-socket command: `air-drive stop` signals
 //! the daemon directly (SIGTERM via the lock-file PID), reusing the same signal
@@ -203,6 +204,13 @@ async fn handle_client(
         state.resume();
         tracing::info!("daemon resumed via control socket");
         "ok\n".to_owned()
+    } else if line == "pause-state" {
+        // For the file-manager menu to label the toggle correctly.
+        if state.is_paused() {
+            "paused\n".to_owned()
+        } else {
+            "running\n".to_owned()
+        }
     } else if line == "status-snapshot" {
         // A richer snapshot reply (matching the JSON schema, with live
         // counters) lands when we wire the daemon's accumulated `last_sync` +
@@ -225,6 +233,12 @@ async fn handle_client(
             body.push('\n');
         }
         body
+    } else if let Some(path) = line.strip_prefix("drive-url ") {
+        // The browser URL for the Drive object backing this path (menu action).
+        match file_status::drive_url(&db, mapping_id, &local_root, Path::new(path)).await {
+            Some(url) => format!("{url}\n"),
+            None => "unknown\n".to_owned(),
+        }
     } else {
         "error: unknown command\n".to_owned()
     };
@@ -440,6 +454,46 @@ mod tests {
         let mut body = String::new();
         reader.read_to_string(&mut body).await.unwrap();
         assert_eq!(body, "synced\tnotes.txt\n");
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    }
+
+    #[tokio::test]
+    async fn control_server_answers_menu_queries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PauseState::new();
+        let cancel = CancellationToken::new();
+        let (_db_tmp, db, mapping_id, local_root) = server_fixture().await;
+        let (activity, _) = broadcast::channel::<()>(8);
+
+        let server = tokio::spawn(run_control_server(
+            tmp.path().to_path_buf(),
+            state.clone(),
+            db,
+            mapping_id,
+            local_root,
+            activity,
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sock = socket_path(tmp.path());
+
+        // pause-state reflects the live flag.
+        assert_eq!(send_command(&sock, "pause-state").await.unwrap(), "running");
+        send_command(&sock, "pause").await.unwrap();
+        assert_eq!(send_command(&sock, "pause-state").await.unwrap(), "paused");
+
+        // drive-url for the seeded `notes.txt` (remote_id "rid").
+        let url = send_command(&sock, "drive-url /home/u/Drive/notes.txt")
+            .await
+            .unwrap();
+        assert_eq!(url, "https://drive.google.com/open?id=rid");
+        // Untracked → unknown.
+        let url = send_command(&sock, "drive-url /home/u/Drive/nope.txt")
+            .await
+            .unwrap();
+        assert_eq!(url, "unknown");
 
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;

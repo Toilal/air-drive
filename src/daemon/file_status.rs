@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use crate::state::items::{self, ItemState};
-use crate::state::mapping::MappingId;
+use crate::state::mapping::{self, MappingId};
 use crate::state::meta::BlockedKind;
 use crate::state::{Db, conflicts, meta, ops};
 
@@ -90,6 +90,39 @@ pub async fn dir_status(
     }
 
     out
+}
+
+/// Browser URL for the Drive object backing the local path `abs`, or `None`
+/// when it isn't tracked (or has no remote id yet). Used by the file-manager
+/// "Open in Google Drive" / "Copy Drive link" actions.
+///
+/// The mapped root resolves to the mapping's remote folder id; any other path
+/// resolves to its `sync_item.remote_id`. `https://drive.google.com/open?id=…`
+/// is a type-agnostic entry point — Drive redirects files, folders and native
+/// Docs to the right viewer.
+pub async fn drive_url(
+    db: &Db,
+    mapping_id: MappingId,
+    local_root: &Path,
+    abs: &Path,
+) -> Option<String> {
+    let rel = abs.strip_prefix(local_root).ok()?;
+    let remote_id = if rel.as_os_str().is_empty() {
+        // The root has no sync_item; use the mapping's remote folder id.
+        mapping::get_single(db.connection())
+            .await
+            .ok()
+            .flatten()
+            .map(|m| m.remote_folder_id)?
+    } else {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        items::get_by_relative_path(db.connection(), mapping_id, &rel_str)
+            .await
+            .ok()
+            .flatten()?
+            .remote_id?
+    };
+    Some(format!("https://drive.google.com/open?id={remote_id}"))
 }
 
 /// Overall sync state for the whole mapping, used for the emblem on the mapped
@@ -313,6 +346,38 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn drive_url_resolves_root_and_tracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("state.db")).await.unwrap();
+        seed_mapping(&db).await; // remote_folder_id = "rid"
+        let root = Path::new("/home/u/Drive");
+        let mid = MappingId(1);
+        items::insert(db.connection(), &item("a.txt", ItemState::Synced))
+            .await
+            .unwrap(); // remote_id = "rid"
+
+        // Root → the mapping's remote folder id.
+        assert_eq!(
+            drive_url(&db, mid, root, root).await.as_deref(),
+            Some("https://drive.google.com/open?id=rid")
+        );
+        // Tracked file → its remote id.
+        assert_eq!(
+            drive_url(&db, mid, root, &root.join("a.txt"))
+                .await
+                .as_deref(),
+            Some("https://drive.google.com/open?id=rid")
+        );
+        // Untracked / outside → None.
+        assert!(
+            drive_url(&db, mid, root, &root.join("nope.txt"))
+                .await
+                .is_none()
+        );
+        assert!(drive_url(&db, mid, root, Path::new("/etc")).await.is_none());
     }
 
     #[tokio::test]
