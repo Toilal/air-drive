@@ -233,6 +233,35 @@ pub async fn trash(http: &DriveHttp, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove `file_id` from all of the authenticated user's folders — Drive's
+/// "Remove from My Drive" — by clearing every current parent via `files.update`,
+/// with no owner change. Used to honour a local deletion of a file the user does
+/// **not** own: they cannot trash it, but they can unlink it from their own
+/// Drive (the owner keeps their copy). No-op if the file already has no parents.
+pub async fn remove_from_my_drive(http: &DriveHttp, file_id: &str) -> Result<()> {
+    let v = get_file_raw(http, file_id, "id,parents").await?;
+    let parents: Vec<String> = v
+        .get("parents")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if parents.is_empty() {
+        return Ok(());
+    }
+    let remove = parents.join(",");
+    http.patch_json(
+        &format!("files/{file_id}"),
+        &[("removeParents", remove.as_str()), ("fields", "id")],
+        &serde_json::json!({}),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Resolve the `<remote-folder>` argument of `air-drive map`:
 ///
 /// - URL like `https://drive.google.com/drive/folders/<id>` → ID extracted
@@ -396,6 +425,72 @@ mod tests {
         let children = list_children(&http, "parent").await.unwrap();
         let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["a.txt", "b.txt"], "both pages must be returned");
+    }
+
+    #[tokio::test]
+    async fn remove_from_my_drive_clears_all_current_parents() {
+        use crate::drive::auth::StaticToken;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // files.get?fields=parents → the file currently lives under two folders.
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/shared-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "shared-1",
+                "parents": ["folderA", "folderB"],
+            })))
+            .mount(&server)
+            .await;
+        // files.update with removeParents listing both parents (no addParents).
+        Mock::given(method("PATCH"))
+            .and(path("/drive/v3/files/shared-1"))
+            .and(query_param("removeParents", "folderA,folderB"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "shared-1" })),
+            )
+            .mount(&server)
+            .await;
+
+        let http = DriveHttp::with_bases(
+            Arc::new(StaticToken::new("t")),
+            format!("{}/drive/v3", server.uri()),
+            format!("{}/upload/drive/v3", server.uri()),
+        )
+        .unwrap();
+
+        // No DELETE/trash mock is mounted: if it didn't PATCH removeParents the
+        // request would 404 and this would error.
+        remove_from_my_drive(&http, "shared-1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_from_my_drive_is_noop_without_parents() {
+        use crate::drive::auth::StaticToken;
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A file with no parents: nothing to remove, no PATCH should be issued.
+        Mock::given(method("GET"))
+            .and(path("/drive/v3/files/orphan"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "orphan" })),
+            )
+            .mount(&server)
+            .await;
+
+        let http = DriveHttp::with_bases(
+            Arc::new(StaticToken::new("t")),
+            format!("{}/drive/v3", server.uri()),
+            format!("{}/upload/drive/v3", server.uri()),
+        )
+        .unwrap();
+
+        remove_from_my_drive(&http, "orphan").await.unwrap();
     }
 
     #[test]

@@ -150,6 +150,139 @@ async fn us2_1_local_delete_propagates() {
 }
 
 // ---------------------------------------------------------------------------
+// local delete of a file the user does NOT own → remove from My Drive
+// ---------------------------------------------------------------------------
+
+/// Deleting locally a file the user doesn't own can't trash it on Drive (403).
+/// The daemon falls back to "Remove from My Drive": the file loses its parent
+/// and leaves the synced folder, but is NOT trashed — the owner keeps it.
+#[tokio::test]
+async fn us2_1b_local_delete_of_non_owned_file_removes_from_my_drive() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let content = b"shared with me";
+    let remote_id = mock.insert_file(Some(&root_id), "shared.txt", content);
+    // Shared with the user, not owned: a trash is forbidden, but the user can
+    // still unlink it from their own Drive.
+    mock.set_unowned(&remote_id, true);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("shared.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(
+        &fx,
+        &mock,
+        &root_id,
+        &[SyncedItem {
+            relative_path: "shared.txt",
+            remote_id: &remote_id,
+            content,
+        }],
+    );
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+    std::fs::remove_file(fx.local_dir.join("shared.txt")).unwrap();
+
+    let unlinked = wait_until(T_LOCAL_TO_REMOTE, || async {
+        let st = mock.state.lock().unwrap();
+        st.files
+            .get(&remote_id)
+            .is_some_and(|f| f.parent_id.is_none() && !f.trashed)
+    })
+    .await;
+    assert!(
+        unlinked,
+        "non-owned file should be removed from My Drive (parent cleared), not trashed; alive? {:?}",
+        daemon.poll_alive()
+    );
+    daemon.shutdown().await;
+
+    // No longer in our tree → no sync_item row.
+    with_state_db(&fx, |conn| {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_item WHERE remote_id = ?1",
+                rusqlite::params![remote_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "the unlinked file should no longer be tracked");
+    });
+}
+
+/// When the user owns neither the file nor its containing folder, even "Remove
+/// from My Drive" is refused. The daemon must not loop forever: it marks the
+/// item `skipped` and leaves the file untouched on Drive.
+#[tokio::test]
+async fn us2_1c_local_delete_of_unremovable_non_owned_file_is_skipped() {
+    let mock = DriveMock::start().await;
+    let root_id = mock.insert_folder(None, "Sync");
+    let content = b"in a shared folder";
+    let remote_id = mock.insert_file(Some(&root_id), "locked.txt", content);
+    // Not owned AND not removable: both trash and removeParents are refused.
+    mock.set_unowned(&remote_id, false);
+
+    let fx = fs_fixture();
+    fx.populate_local(&[("locked.txt", content)]);
+    fx.write_default_config();
+    fx.write_token_file();
+    seed_synced_state(
+        &fx,
+        &mock,
+        &root_id,
+        &[SyncedItem {
+            relative_path: "locked.txt",
+            remote_id: &remote_id,
+            content,
+        }],
+    );
+
+    let mut daemon = DaemonProcess::spawn(&fx, &mock, &["--remote-poll-interval", "10"]).await;
+    std::fs::remove_file(fx.local_dir.join("locked.txt")).unwrap();
+
+    let skipped = wait_until(T_LOCAL_TO_REMOTE, || async {
+        with_state_db(&fx, |conn| {
+            conn.query_row(
+                "SELECT state FROM sync_item WHERE remote_id = ?1",
+                rusqlite::params![remote_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        }) == Some("skipped".to_string())
+    })
+    .await;
+    assert!(
+        skipped,
+        "an unremovable non-owned file should be marked skipped; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // The file is untouched on Drive: still parented, not trashed.
+    {
+        let st = mock.state.lock().unwrap();
+        let f = st.files.get(&remote_id).expect("file still on Drive");
+        assert_eq!(
+            f.parent_id.as_deref(),
+            Some(root_id.as_str()),
+            "parent must be intact"
+        );
+        assert!(!f.trashed, "file must not be trashed");
+    }
+    // And the delete op was consumed, not left retrying forever.
+    with_state_db(&fx, |conn| {
+        let ops: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pending_operation", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            ops, 0,
+            "the delete op must be consumed, not retried forever"
+        );
+    });
+    daemon.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // local rename propagates via `moveto`, NOT a re-upload
 // ---------------------------------------------------------------------------
 

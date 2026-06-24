@@ -102,12 +102,49 @@ impl From<tokio_rusqlite::Error> for Error {
     }
 }
 
+impl Error {
+    /// True for a Drive `403` whose body carries the `insufficientFilePermissions`
+    /// reason: the authenticated user may not mutate this file (typically because
+    /// they are not its owner — e.g. trying to trash a file merely shared with
+    /// them). Permanent, so it must never be retried.
+    pub fn is_insufficient_permissions(&self) -> bool {
+        matches!(
+            self,
+            Error::DriveHttp { status: 403, body } if body.contains("insufficientFilePermissions")
+        )
+    }
+}
+
 /// Crate-wide `Result` alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insufficient_permissions_classification() {
+        let not_owner = Error::DriveHttp {
+            status: 403,
+            body: r#"{"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}"#.into(),
+        };
+        assert!(not_owner.is_insufficient_permissions());
+
+        // A different 403 reason (e.g. rate limit) is not this case.
+        let other_403 = Error::DriveHttp {
+            status: 403,
+            body: r#"{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}"#.into(),
+        };
+        assert!(!other_403.is_insufficient_permissions());
+
+        // Non-403 statuses never match.
+        let not_found = Error::DriveHttp {
+            status: 404,
+            body: "insufficientFilePermissions".into(),
+        };
+        assert!(!not_found.is_insufficient_permissions());
+        assert!(!Error::Network("down".into()).is_insufficient_permissions());
+    }
 
     #[test]
     fn insecure_permissions_displays() {

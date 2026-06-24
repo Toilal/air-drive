@@ -353,16 +353,55 @@ async fn execute(
 
         Operation::DeleteRemote => {
             if let Some(rid) = &item.remote_id {
-                // Mark in-flight so the poller's `removed` event doesn't
+                // Mark in-flight so the poller's `removed`/`trashed` echo doesn't
                 // re-enqueue a `DeleteLocal` for the item we're already
                 // deleting end-to-end.
                 let _guard = in_flight.mark(rid);
-                match item.kind {
-                    items::ItemKind::Dir => engine.remove_dir_remote(rid).await?,
-                    items::ItemKind::File => engine.delete_remote(rid).await?,
+                let res = match item.kind {
+                    items::ItemKind::Dir => engine.remove_dir_remote(rid).await,
+                    items::ItemKind::File => engine.delete_remote(rid).await,
+                };
+                match res {
+                    Ok(()) => items::delete(db.connection(), item.id).await?,
+                    // The user deleted locally a file they don't own, so Drive
+                    // refuses to trash it. Fall back to "Remove from My Drive":
+                    // unlink it from the user's folders so it disappears from
+                    // their Drive too (the owner keeps their copy). If even that
+                    // is refused, stop fighting — mark the item `skipped` so
+                    // neither side re-syncs it. Either branch finishes the op (no
+                    // retry on a permanent permission error).
+                    Err(e) if e.is_insufficient_permissions() => {
+                        match crate::drive::metadata::remove_from_my_drive(http, rid).await {
+                            Ok(()) => {
+                                tracing::info!(
+                                    relative_path = %item.relative_path,
+                                    "not the owner — removed file from My Drive instead of trashing it"
+                                );
+                                items::delete(db.connection(), item.id).await?;
+                            }
+                            Err(e2) => {
+                                tracing::warn!(
+                                    relative_path = %item.relative_path,
+                                    error = %e2,
+                                    "not the owner and cannot remove the file from My Drive — leaving \
+                                     it on Drive and no longer syncing it; remove it via \
+                                     drive.google.com if you want it gone"
+                                );
+                                items::set_state(
+                                    db.connection(),
+                                    item.id,
+                                    items::ItemState::Skipped,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    Err(e) => return Err(e),
                 }
+            } else {
+                // Never reached Drive — just drop the row.
+                items::delete(db.connection(), item.id).await?;
             }
-            items::delete(db.connection(), item.id).await?;
         }
 
         Operation::DeleteLocal => {
