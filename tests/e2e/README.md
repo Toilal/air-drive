@@ -32,6 +32,7 @@ self-skip when the required env vars are missing.
 | `e11_remote_new_folder_with_file_syncs_locally` | A new Drive folder containing a file is created locally with its contents. |
 | `e12_local_new_folder_with_file_syncs_to_drive` | A new local folder + nested file (racing the recursive-watch registration) syncs to Drive. |
 | `e13_local_delete_trashes_on_drive` | A local delete propagates to Drive as a **trash** (default policy): the file leaves the listing but stays recoverable with `trashed=true`, not permanently deleted. |
+| `e14_local_move_out_of_tree_trashes_on_drive` | Moving a file *out of the watched tree* (a lone inotify rename `From`, e.g. sending it to the desktop trash) propagates as a delete on Drive instead of being lost until the safety-net reconcile. |
 
 ## Required env vars
 
