@@ -903,6 +903,97 @@ async fn e13_local_delete_trashes_on_drive() {
 }
 
 // ---------------------------------------------------------------------------
+// E14 — moving a file out of the watched tree (e.g. to the desktop trash)
+// propagates as a delete on Drive
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "e2e: requires real Drive credentials"]
+async fn e14_local_move_out_of_tree_trashes_on_drive() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    // A destination *outside* the watched tree but on the same filesystem (a
+    // sibling of `local`), mimicking a desktop file manager moving a file to the
+    // trash: inotify sees a lone rename `From` with no matching `To`.
+    let outside = fx._tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("create outside dir");
+
+    let content = b"trash me";
+    std::fs::write(fx.local_dir.join("doomed.txt"), content).expect("write doomed.txt");
+
+    seed_account_and_mapping(&fx);
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    // Wait for the initial upload, then capture the Drive id.
+    let uploaded = common::wait_until(Duration::from_secs(120), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "doomed.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        uploaded,
+        "doomed.txt should upload to Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+    let id = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .find(|c| c.name == "doomed.txt")
+        .expect("doomed.txt on Drive")
+        .id;
+
+    // Gate on the live watcher so the move is caught by inotify.
+    let control_sock = fx.config_dir.join("runtime/control.sock");
+    let watcher_live = common::wait_until(Duration::from_secs(90), || {
+        let p = control_sock.clone();
+        async move { p.exists() }
+    })
+    .await;
+    assert!(
+        watcher_live,
+        "the daemon should bind its control socket (watcher attached) before the move; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Move the file OUT of the watched tree — a lone inotify `From`, no `To`.
+    std::fs::rename(fx.local_dir.join("doomed.txt"), outside.join("doomed.txt"))
+        .expect("move doomed.txt out of the watched tree");
+
+    // The reaper times the uncorrelated `From` out into a `Deleted`, which
+    // propagates to Drive as a trash (the default deletion policy).
+    let gone = common::wait_until(Duration::from_secs(120), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| !cs.iter().any(|c| c.name == "doomed.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        gone,
+        "moving doomed.txt out of the tree should trash it on Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Recoverable: still present with trashed=true, not permanently deleted.
+    let raw = metadata::get_file_raw(&fx.drive, &id, "id,trashed")
+        .await
+        .expect("get_file_raw for trashed check");
+    assert_eq!(
+        raw.get("trashed").and_then(|v| v.as_bool()),
+        Some(true),
+        "doomed.txt should be trashed (recoverable), not permanently deleted"
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

@@ -13,7 +13,7 @@ pub mod debounce;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -25,11 +25,24 @@ use crate::config::SymlinkPolicy;
 use crate::error::{Error, Result};
 
 /// How long a buffered rename `From` half-event waits for its matching `To`
-/// before being discarded. Linux inotify delivers `From`, `To` and `Both` for a
-/// within-tree rename in the same batch, so the match is effectively instant; a
-/// `From` that lingers past this TTL was a move *out* of the watched tree (no
-/// `To` follows), whose deletion the periodic safety-net reconcile reconciles.
+/// before being treated as a move *out* of the watched tree. Linux inotify
+/// delivers `From`, `To` and `Both` for a within-tree rename in the same batch,
+/// so the match is effectively instant; a `From` that lingers past this TTL had
+/// no `To` follow it, i.e. the file was moved out of the tree (most commonly
+/// into the desktop trash) — equivalent to a deletion, so it is emitted as
+/// [`WatchEvent::Deleted`] rather than silently dropped.
 const RENAME_CORRELATION_TTL: Duration = Duration::from_secs(5);
+
+/// How often the rename reaper task scans for `From` halves that have outlived
+/// [`RENAME_CORRELATION_TTL`]. Bounds how late a move-out-of-tree deletion is
+/// emitted on an otherwise quiet tree (worst case TTL + this interval).
+const RENAME_REAP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Rename `From` halves buffered by tracker (cookie), shared between the notify
+/// callback (which inserts/correlates) and the reaper task (which times out
+/// uncorrelated halves into deletions). A plain `std::sync::Mutex` is enough:
+/// every critical section is a quick map operation with no `.await` inside.
+type SharedRenames = Arc<Mutex<HashMap<usize, (PathBuf, Instant)>>>;
 
 /// Compile a list of glob patterns into a matcher. Each pattern is matched
 /// against the **file name** (not the full path) at runtime — see
@@ -81,9 +94,17 @@ impl WatchEvent {
     }
 }
 
-/// Owns the `notify` watcher handle. Dropping it stops the inotify subscription.
+/// Owns the `notify` watcher handle. Dropping it stops the inotify subscription
+/// and aborts the rename reaper task.
 pub struct Watcher {
     _inner: RecommendedWatcher,
+    reaper: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.reaper.abort();
+    }
 }
 
 impl Watcher {
@@ -106,10 +127,12 @@ impl Watcher {
 
         let handler_root = root.clone();
         let handler_ignore = ignore.clone();
-        // Per-watcher buffer correlating inotify rename half-events by tracker
-        // (cookie). Owned by the `FnMut` handler, so access is serialised by the
-        // single notify callback thread — no lock needed.
-        let mut pending_renames: HashMap<usize, (PathBuf, Instant)> = HashMap::new();
+        // Buffer correlating inotify rename half-events by tracker (cookie),
+        // shared with the reaper task so a `From` with no `To` (a move out of
+        // the tree) is timed out into a deletion even on an otherwise quiet tree.
+        let pending_renames: SharedRenames = Arc::new(Mutex::new(HashMap::new()));
+        let reaper_renames = pending_renames.clone();
+        let reaper_tx = tx.clone();
         let handler = move |res: notify::Result<notify::Event>| {
             let ev = match res {
                 Ok(e) => e,
@@ -118,17 +141,19 @@ impl Watcher {
                     return;
                 }
             };
-            for converted in convert_event(
-                &ev,
-                &handler_root,
-                &handler_ignore,
-                symlinks,
-                &mut pending_renames,
-            ) {
+            // Hold the lock only for the conversion; send outside it.
+            let converted = {
+                let mut pending = match pending_renames.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                convert_event(&ev, &handler_root, &handler_ignore, symlinks, &mut pending)
+            };
+            for ev in converted {
                 // `try_send` is non-blocking. Capacity > 1024 should swallow
                 // every realistic burst, but if it doesn't we'd rather drop a
                 // single event than block the inotify thread.
-                if let Err(e) = tx.try_send(converted) {
+                if let Err(e) = tx.try_send(ev) {
                     tracing::warn!(error = %e, "watch channel full or closed");
                 }
             }
@@ -139,7 +164,21 @@ impl Watcher {
         inner
             .watch(local_root, RecursiveMode::Recursive)
             .map_err(|e| Error::Config(format!("notify watch({}): {e}", local_root.display())))?;
-        Ok((Self { _inner: inner }, rx))
+
+        // Reaper: times out uncorrelated `From` halves into `Deleted` events.
+        let reaper = tokio::spawn(reap_renames(
+            reaper_renames,
+            reaper_tx,
+            RENAME_CORRELATION_TTL,
+            RENAME_REAP_INTERVAL,
+        ));
+        Ok((
+            Self {
+                _inner: inner,
+                reaper,
+            },
+            rx,
+        ))
     }
 }
 
@@ -163,8 +202,11 @@ impl Watcher {
 /// - `Both` → on Linux the `To` already emitted the rename and cleared T, so this
 ///   is dropped; if T is still buffered (a backend that skips the separate `To`),
 ///   resolve it here.
-/// - a lone `From` (move out of the tree) stays buffered until [`RENAME_CORRELATION_TTL`]
-///   evicts it; the deletion is then caught by the periodic safety-net reconcile.
+/// - a lone `From` (move out of the tree) is buffered until [`RENAME_CORRELATION_TTL`]
+///   passes with no matching `To`, then emitted as [`WatchEvent::Deleted`] — by the
+///   next event's sweep, or the [`reap_renames`] task on a quiet tree. Moving a file
+///   to the desktop trash is exactly this case, so such deletes propagate promptly
+///   rather than waiting for the safety-net reconcile.
 fn convert_event(
     ev: &notify::Event,
     root: &Path,
@@ -190,17 +232,22 @@ fn convert_event(
             }
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+            // Any `From` that has outlived the TTL was a move out of the tree:
+            // surface it as a deletion before buffering the new one.
+            for p in drain_stale_renames(pending_renames, Instant::now(), RENAME_CORRELATION_TTL) {
+                out.push(WatchEvent::Deleted(p));
+            }
             // Buffer the source; the matching `To` (same tracker) resolves it.
             if let (Some(t), Some(p)) = (tracker, kept.first()) {
-                evict_stale_renames(pending_renames);
                 pending_renames.insert(t, ((*p).clone(), Instant::now()));
             }
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
             // Sweep stale `From` halves here too, not only when a fresh `From`
-            // arrives — otherwise a lone move-out-of-tree on an otherwise quiet
-            // tree lingers in the buffer past its TTL.
-            evict_stale_renames(pending_renames);
+            // arrives — surfacing each as a deletion.
+            for p in drain_stale_renames(pending_renames, Instant::now(), RENAME_CORRELATION_TTL) {
+                out.push(WatchEvent::Deleted(p));
+            }
             let from = tracker
                 .and_then(|t| pending_renames.remove(&t))
                 .map(|(p, _)| p);
@@ -245,12 +292,55 @@ fn convert_event(
     out
 }
 
-/// Drop buffered rename `From` halves older than [`RENAME_CORRELATION_TTL`] — a
-/// `From` with no following `To` was a move out of the watched tree, so its slot
-/// would otherwise leak. Called whenever a fresh `From` is buffered.
-fn evict_stale_renames(pending: &mut HashMap<usize, (PathBuf, Instant)>) {
-    let now = Instant::now();
-    pending.retain(|_, (_, seen)| now.duration_since(*seen) < RENAME_CORRELATION_TTL);
+/// Remove and return the source paths of buffered rename `From` halves older
+/// than `ttl`. A `From` with no following `To` within the TTL was a move out of
+/// the watched tree (commonly into the desktop trash); each returned path is a
+/// deletion the caller must propagate. Pure and time-injectable for testing.
+fn drain_stale_renames(
+    pending: &mut HashMap<usize, (PathBuf, Instant)>,
+    now: Instant,
+    ttl: Duration,
+) -> Vec<PathBuf> {
+    let stale: Vec<usize> = pending
+        .iter()
+        .filter(|(_, (_, seen))| now.duration_since(*seen) >= ttl)
+        .map(|(t, _)| *t)
+        .collect();
+    stale
+        .into_iter()
+        .filter_map(|t| pending.remove(&t).map(|(p, _)| p))
+        .collect()
+}
+
+/// Long-lived task that times out uncorrelated rename `From` halves into
+/// [`WatchEvent::Deleted`] events. Without it, a file moved out of the watched
+/// tree on an otherwise quiet tree (no later fs event to trigger a sweep) would
+/// linger buffered until the next event — its deletion reaching Drive only via
+/// the slow safety-net reconcile. Exits once the receiver is gone.
+async fn reap_renames(
+    pending: SharedRenames,
+    tx: mpsc::Sender<WatchEvent>,
+    ttl: Duration,
+    interval: Duration,
+) {
+    loop {
+        tokio::time::sleep(interval).await;
+        if tx.is_closed() {
+            return;
+        }
+        let drained = {
+            let mut guard = match pending.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            drain_stale_renames(&mut guard, Instant::now(), ttl)
+        };
+        for path in drained {
+            if tx.send(WatchEvent::Deleted(path)).await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 /// What a local path resolves to for sync purposes.
@@ -574,8 +664,8 @@ mod tests {
         );
     }
 
-    /// A move *out* of the tree is a lone `From`: buffered, no event now (the
-    /// safety-net reconcile handles the deletion), and TTL-evictable.
+    /// A move *out* of the tree is a lone `From`: buffered, no event emitted
+    /// immediately (it still awaits a possible `To`), and TTL-draining later.
     #[test]
     fn convert_move_out_of_tree_buffers_from_silently() {
         let m = default_matcher();
@@ -592,6 +682,81 @@ mod tests {
             vec![]
         );
         assert_eq!(pending.len(), 1, "the From half is buffered");
+    }
+
+    /// `drain_stale_renames` returns only the `From` halves older than the TTL
+    /// and removes them, leaving fresh ones buffered.
+    #[test]
+    fn drain_stale_renames_returns_only_expired() {
+        let mut pending: HashMap<usize, (PathBuf, Instant)> = HashMap::new();
+        let now = Instant::now();
+        let old = PathBuf::from("/x/old.txt");
+        let fresh = PathBuf::from("/x/fresh.txt");
+        pending.insert(1, (old.clone(), now - Duration::from_secs(10)));
+        pending.insert(2, (fresh.clone(), now));
+
+        let drained = drain_stale_renames(&mut pending, now, RENAME_CORRELATION_TTL);
+
+        assert_eq!(drained, vec![old]);
+        assert_eq!(pending.len(), 1, "fresh From stays buffered");
+        assert!(pending.contains_key(&2));
+    }
+
+    /// A stale, never-correlated `From` (a move out of the tree) is surfaced as a
+    /// `Deleted` when the next rename event triggers a sweep.
+    #[test]
+    fn convert_sweeps_expired_from_into_deleted() {
+        let m = default_matcher();
+        let root = Path::new("/x");
+        let mut pending: HashMap<usize, (PathBuf, Instant)> = HashMap::new();
+        let gone = root.join("gone.txt");
+        // A From from 10s ago that never got a To (moved to trash).
+        pending.insert(99, (gone.clone(), Instant::now() - Duration::from_secs(10)));
+
+        // An unrelated fresh `From` arrives and triggers the sweep.
+        let other = root.join("other.txt");
+        let e_from = name_event(
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            Some(1),
+            &[&other],
+        );
+        let out = convert_event(&e_from, root, &m, SymlinkPolicy::Skip, &mut pending);
+
+        assert_eq!(out, vec![WatchEvent::Deleted(gone)]);
+        assert!(pending.contains_key(&1), "the fresh From is now buffered");
+        assert!(!pending.contains_key(&99), "the expired From was drained");
+    }
+
+    /// On a quiet tree (no further fs events), the reaper task times an
+    /// uncorrelated `From` out into a `Deleted` on its own.
+    #[tokio::test]
+    async fn reaper_times_out_uncorrelated_from_into_deleted() {
+        let pending: SharedRenames = Arc::new(Mutex::new(HashMap::new()));
+        let gone = PathBuf::from("/x/gone.txt");
+        pending
+            .lock()
+            .unwrap()
+            .insert(7, (gone.clone(), Instant::now()));
+
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(8);
+        // ttl = 0 → the entry is stale on the first tick.
+        let task = tokio::spawn(reap_renames(
+            pending.clone(),
+            tx,
+            Duration::ZERO,
+            Duration::from_millis(10),
+        ));
+
+        let ev = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("reaper should emit within the timeout")
+            .expect("channel open");
+        assert_eq!(ev, WatchEvent::Deleted(gone));
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "the drained entry is removed from the buffer"
+        );
+        task.abort();
     }
 
     /// Defensive: a backend that emits `From` + `Both` without a separate `To`
