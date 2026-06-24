@@ -573,10 +573,16 @@ fn remote_trash(mock: &DriveMock, remote_id: &str) {
     });
 }
 
-/// True once the remote file `remote_id` is gone (a propagated local delete
-/// trashes it via the Drive API, dropping it from the mock's file map).
+/// True once the remote file `remote_id` is trashed. A propagated local delete
+/// uses the default (recoverable) policy: the file stays in the mock's map with
+/// `trashed = true` rather than being permanently removed.
 fn remote_gone(mock: &DriveMock, remote_id: &str) -> bool {
-    !mock.state.lock().unwrap().files.contains_key(remote_id)
+    mock.state
+        .lock()
+        .unwrap()
+        .files
+        .get(remote_id)
+        .is_some_and(|f| f.trashed)
 }
 
 /// Create a file on the mock Drive AND log it in the change feed, so a polling

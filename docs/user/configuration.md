@@ -106,6 +106,24 @@ The default `ignore_patterns` cover well-known editor/OS scratch files:
 - **JetBrains** — `*.___jb_tmp___`, `*.___jb_old___`
 - **OS metadata** — `.DS_Store`, `._*`, `Thumbs.db`, `desktop.ini`
 
+### `[sync]` — synchronisation policy
+
+| Key              | Type                          | Default   | Description                                                                 |
+| ---------------- | ----------------------------- | --------- | --------------------------------------------------------------------------- |
+| `remote_deletes` | `"trash"` \| `"permanent"`    | `"trash"` | How a deletion is propagated to Drive when you remove a synced file or folder locally. |
+
+When you delete a synced file locally, air-drive propagates the deletion to
+Drive. By default (`"trash"`) the remote object is moved to **Drive's trash**,
+where it stays recoverable for ~30 days — a safety net against an accidental
+local `rm`. Set `remote_deletes = "permanent"` to instead **permanently delete**
+the remote object, bypassing the trash and reclaiming Drive storage immediately;
+this is **not recoverable**. The policy applies to both files and folders, and
+to both the `rclone` and native HTTP engines.
+
+> The reverse direction is unaffected: a file you trash *on Drive* is removed
+> locally but kept as a restorable tombstone regardless of this setting (see
+> [sync model](../dev/sync-model.md)).
+
 ## Native Google Docs
 
 Google's own formats — Docs, Sheets, Slides, Drawings, Forms — are not stored as
@@ -156,4 +174,7 @@ path = "/usr/local/bin/rclone"
 auto_create_root = false
 ignore_patterns = [".*.swp", "*~", ".DS_Store"]
 symlinks = "skip"
+
+[sync]
+remote_deletes = "trash"
 ```

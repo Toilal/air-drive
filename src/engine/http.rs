@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
+use crate::config::RemoteDeleteMode;
 use crate::drive::http::DriveHttp;
 use crate::engine::staging;
 use crate::engine::{BulkDownload, BulkUpload, RemoteFile, SyncEngine};
@@ -24,13 +25,27 @@ use crate::error::{Error, Result};
 #[derive(Clone)]
 pub struct HttpEngine {
     http: Arc<DriveHttp>,
+    /// How a propagated deletion removes the remote object: trash (recoverable)
+    /// or permanent. From `[sync].remote_deletes`.
+    delete_mode: RemoteDeleteMode,
 }
 
 impl HttpEngine {
     /// Build a new engine over an existing [`DriveHttp`] client.
-    pub fn new(http: DriveHttp) -> Self {
+    pub fn new(http: DriveHttp, delete_mode: RemoteDeleteMode) -> Self {
         Self {
             http: Arc::new(http),
+            delete_mode,
+        }
+    }
+
+    /// Remove a remote object by id, honouring [`RemoteDeleteMode`]: trash
+    /// (recoverable) or permanent `files.delete`. Shared by file and folder
+    /// deletes, which behave identically on Drive.
+    async fn remove_remote(&self, remote_id: &str) -> Result<()> {
+        match self.delete_mode {
+            RemoteDeleteMode::Trash => crate::drive::metadata::trash(&self.http, remote_id).await,
+            RemoteDeleteMode::Permanent => self.http.delete(&format!("files/{remote_id}")).await,
         }
     }
 
@@ -158,8 +173,7 @@ impl SyncEngine for HttpEngine {
     }
 
     async fn delete_remote(&self, remote_id: &str) -> Result<()> {
-        let path = format!("files/{remote_id}");
-        self.http.delete(&path).await
+        self.remove_remote(remote_id).await
     }
 
     async fn create_dir_remote(&self, remote_parent_id: &str, name: &str) -> Result<RemoteFile> {
@@ -174,9 +188,8 @@ impl SyncEngine for HttpEngine {
     }
 
     async fn remove_dir_remote(&self, remote_id: &str) -> Result<()> {
-        // A Drive `files.delete` by id trashes a folder just like a file.
-        let path = format!("files/{remote_id}");
-        self.http.delete(&path).await
+        // A folder is removed by id exactly like a file (trash or permanent).
+        self.remove_remote(remote_id).await
     }
 
     async fn bulk_download(
@@ -256,6 +269,6 @@ mod tests {
     fn engine_can_be_constructed_with_static_token() {
         let provider = Arc::new(StaticToken::new("t"));
         let http = DriveHttp::with_bases(provider, "http://x", "http://x/upload").unwrap();
-        let _engine = HttpEngine::new(http);
+        let _engine = HttpEngine::new(http, RemoteDeleteMode::Trash);
     }
 }

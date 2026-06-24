@@ -8,6 +8,7 @@
 //!   `remote_folder_id` lives in `state.db`, not here).
 //! - `[daemon]` — runtime tuning.
 //! - `[rclone]` — explicit override of the `rclone` binary path.
+//! - `[sync]` — synchronisation policy (e.g. how remote deletions are performed).
 //!
 //! Every section is optional; a missing file is equivalent to `Config::default()`.
 
@@ -34,6 +35,8 @@ pub struct Config {
     pub rclone: RcloneConfig,
     /// `[watch]` — local filesystem watcher tuning.
     pub watch: WatchConfig,
+    /// `[sync]` — synchronisation policy.
+    pub sync: SyncConfig,
 }
 
 /// Optional OAuth client override (Q1 clarification — hybrid model).
@@ -224,6 +227,31 @@ pub fn default_ignore_patterns() -> &'static [&'static str] {
     ]
 }
 
+/// How a propagated deletion removes the object on Drive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteDeleteMode {
+    /// Move the remote file/folder to Drive's trash — recoverable for ~30 days
+    /// (the default). A sync client should not make a user's remote data
+    /// unrecoverable just because the local copy was removed.
+    #[default]
+    Trash,
+    /// Permanently delete the remote file/folder, bypassing the trash. Not
+    /// recoverable. Opt-in for users who want a propagated local delete to
+    /// reclaim Drive storage immediately.
+    Permanent,
+}
+
+/// `[sync]` — synchronisation policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyncConfig {
+    /// How a propagated deletion removes the object on Drive: `trash` (default,
+    /// recoverable) or `permanent`. Applies to both files and folders, and to
+    /// both the `rclone` and native HTTP engines.
+    pub remote_deletes: RemoteDeleteMode,
+}
+
 /// Explicit `rclone` binary override.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -368,6 +396,32 @@ mod tests {
             body.contains(".DS_Store"),
             "config.toml missing .DS_Store default: {body}"
         );
+    }
+
+    #[test]
+    fn remote_deletes_defaults_to_trash() {
+        let cfg = Config::default();
+        assert_eq!(cfg.sync.remote_deletes, RemoteDeleteMode::Trash);
+    }
+
+    #[test]
+    fn remote_deletes_round_trips_permanent() {
+        let toml = r#"
+            [sync]
+            remote_deletes = "permanent"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.sync.remote_deletes, RemoteDeleteMode::Permanent);
+    }
+
+    #[test]
+    fn unknown_remote_delete_mode_rejected() {
+        let toml = r#"
+            [sync]
+            remote_deletes = "shred"
+        "#;
+        let res: std::result::Result<Config, _> = toml::from_str(toml);
+        assert!(res.is_err());
     }
 
     #[test]
