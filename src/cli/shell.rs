@@ -32,6 +32,15 @@ const NAUTILUS_EXTENSION: &str = include_str!("../../assets/nautilus/air-drive-o
 /// File name the extension is deployed under (and removed by `uninstall`).
 const EXTENSION_FILENAME: &str = "air-drive-overlay.py";
 
+/// MIME package + desktop handler that make a native-Doc shortcut open in the
+/// browser on double-click (instead of a text editor). Bundled with the binary.
+const MIME_PACKAGE: &str = include_str!("../../assets/mime/air-drive-shortcuts.xml");
+const DESKTOP_ENTRY: &str =
+    include_str!("../../assets/applications/air-drive-open-shortcut.desktop");
+const MIME_TYPE: &str = "application/vnd.air-drive.shortcut";
+const MIME_FILENAME: &str = "air-drive-shortcuts.xml";
+const DESKTOP_FILENAME: &str = "air-drive-open-shortcut.desktop";
+
 /// `air-drive shell <action>`.
 #[derive(Debug, Subcommand)]
 pub enum ShellAction {
@@ -252,6 +261,9 @@ fn install(skip_deps: bool) -> Result<ExitCode> {
     std::fs::write(&dest, NAUTILUS_EXTENSION)?;
     tracing::info!(extension = %dest.display(), "deployed Nautilus overlay extension");
     eprintln!("[shell] installed extension: {}", dest.display());
+
+    register_file_association();
+
     eprintln!(
         "[shell] fully restart the file manager to load it: `killall nautilus` (a plain \
          `nautilus -q` can leave a cached background instance that keeps the old emblems), or \
@@ -276,11 +288,118 @@ fn uninstall() -> Result<ExitCode> {
         }
         Err(e) => return Err(e.into()),
     }
+    unregister_file_association();
     eprintln!(
         "[shell] the python3-nautilus system package was left installed (it is shared). \
          Remove it via your package manager if you no longer want it."
     );
     Ok(ExitCode::Ok)
+}
+
+/// Where the MIME package and the desktop handler are deployed under
+/// `~/.local/share`. Returns `(data_dir, mime_packages_dir, applications_dir)`.
+fn association_dirs() -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let dirs = directories::BaseDirs::new()
+        .ok_or_else(|| Error::Config("cannot resolve $HOME for the file association".into()))?;
+    let data = dirs.data_dir().to_path_buf();
+    let mime = data.join("mime").join("packages");
+    let apps = data.join("applications");
+    Ok((data, mime, apps))
+}
+
+/// Register the MIME type + desktop handler so a native-Doc shortcut opens in
+/// the browser on double-click. Best-effort: warns rather than failing the whole
+/// install, since the status emblems work regardless.
+fn register_file_association() {
+    let (data, mime_dir, apps_dir) = match association_dirs() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[shell] skipping file association: {e}");
+            return;
+        }
+    };
+    // Resolve the absolute binary path for the desktop entry's Exec — the
+    // session launcher's PATH may not include where `air-drive` lives.
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "air-drive".to_owned());
+    let desktop = DESKTOP_ENTRY.replace("__AIRDRIVE_BIN__", &bin);
+
+    if let Err(e) = std::fs::create_dir_all(&mime_dir)
+        .and_then(|()| std::fs::write(mime_dir.join(MIME_FILENAME), MIME_PACKAGE))
+    {
+        eprintln!("[shell] could not install the MIME package: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&apps_dir)
+        .and_then(|()| std::fs::write(apps_dir.join(DESKTOP_FILENAME), desktop))
+    {
+        eprintln!("[shell] could not install the desktop handler: {e}");
+        return;
+    }
+
+    // Refresh the freedesktop caches and make our handler the default. All
+    // best-effort — a missing tool just means the user re-runs after installing
+    // it, or sets "Open with" once by hand.
+    run_quiet(Command::new("update-mime-database").arg(data.join("mime")));
+    run_quiet(Command::new("update-desktop-database").arg(&apps_dir));
+    run_quiet(
+        Command::new("xdg-mime")
+            .args(["default", DESKTOP_FILENAME])
+            .arg(MIME_TYPE),
+    );
+    eprintln!("[shell] registered Google Doc shortcuts to open in the browser on double-click");
+}
+
+/// Reverse [`register_file_association`]: remove the MIME package + handler and
+/// refresh the caches. Idempotent.
+fn unregister_file_association() {
+    let Ok((data, mime_dir, apps_dir)) = association_dirs() else {
+        return;
+    };
+    let _ = std::fs::remove_file(mime_dir.join(MIME_FILENAME));
+    let _ = std::fs::remove_file(apps_dir.join(DESKTOP_FILENAME));
+    run_quiet(Command::new("update-mime-database").arg(data.join("mime")));
+    run_quiet(Command::new("update-desktop-database").arg(&apps_dir));
+}
+
+/// Run a command for its side effect, ignoring success and warning on failure to
+/// spawn. Used for the freedesktop cache-refresh tools.
+fn run_quiet(cmd: &mut Command) {
+    if let Err(e) = cmd.output() {
+        tracing::debug!(error = %e, "shell integration helper not available");
+    }
+}
+
+/// `air-drive open-shortcut <file>` — open the Google link a native-Doc shortcut
+/// points to. Invoked by the desktop file association on double-click.
+pub fn open_shortcut(path: &Path) -> Result<ExitCode> {
+    let content = std::fs::read_to_string(path).map_err(Error::Io)?;
+    let url = shortcut_target_url(&content)?;
+    Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map_err(Error::Io)?;
+    Ok(ExitCode::Ok)
+}
+
+/// Extract and validate the web URL from a shortcut file's JSON body. Only
+/// http(s) URLs are accepted — a shortcut may come from a shared Drive folder,
+/// so we never hand an arbitrary scheme (file://, etc.) to `xdg-open`.
+fn shortcut_target_url(content: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| Error::Config(format!("shortcut is not valid JSON: {e}")))?;
+    let url = value
+        .get("url")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| Error::Config("shortcut file has no `url` field".into()))?;
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(Error::Config(format!(
+            "refusing to open non-http(s) shortcut URL: {url}"
+        )));
+    }
+    Ok(url.to_owned())
 }
 
 /// Report detection without changing anything.
@@ -344,5 +463,29 @@ mod tests {
     fn extension_path_ends_with_nautilus_python_extension() {
         let p = extension_path().expect("path resolves");
         assert!(p.ends_with("nautilus-python/extensions/air-drive-overlay.py"));
+    }
+
+    #[test]
+    fn shortcut_target_url_accepts_https_and_rejects_others() {
+        let ok = r#"{"url":"https://docs.google.com/spreadsheets/d/ABC/edit","doc_id":"ABC"}"#;
+        assert_eq!(
+            shortcut_target_url(ok).unwrap(),
+            "https://docs.google.com/spreadsheets/d/ABC/edit"
+        );
+
+        // Non-http(s) scheme is refused (a shared shortcut is untrusted input).
+        let evil = r#"{"url":"file:///etc/passwd"}"#;
+        assert!(shortcut_target_url(evil).is_err());
+
+        // Missing url / not JSON.
+        assert!(shortcut_target_url(r#"{"doc_id":"x"}"#).is_err());
+        assert!(shortcut_target_url("not json").is_err());
+    }
+
+    #[test]
+    fn bundled_desktop_entry_has_exec_placeholder() {
+        // The Exec line is templated with the real binary path at install time.
+        assert!(DESKTOP_ENTRY.contains("__AIRDRIVE_BIN__"));
+        assert!(DESKTOP_ENTRY.contains(MIME_TYPE));
     }
 }

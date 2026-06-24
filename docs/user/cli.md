@@ -187,6 +187,10 @@ link* on a tracked file or folder (a native Google Doc shortcut opens via the
 URL stored in the file, labelled *Open Google Doc*), and *Pause / Resume
 air-drive sync* in the background of a folder inside the synced tree.
 
+`install` additionally registers a MIME type + desktop handler so that
+**double-clicking** a native Google Doc shortcut (`.gdoc`/`.gsheet`/…) opens the
+document in your browser instead of a text editor. `uninstall` removes it.
+
 ## Exit codes
 
 | Code | Name                    | Meaning                                                        |
