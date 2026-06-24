@@ -182,6 +182,11 @@ The extension reads each file's status from the running daemon over its control
 socket and paints an emblem: synced, syncing/pending, or conflict. With no daemon
 running (or a file outside the mapping) it shows no emblem.
 
+It also adds **right-click actions**: *Open in Google Drive* and *Copy Drive
+link* on a tracked file or folder (a native Google Doc shortcut opens via the
+URL stored in the file, labelled *Open Google Doc*), and *Pause / Resume
+air-drive sync* in the background of a folder inside the synced tree.
+
 ## Exit codes
 
 | Code | Name                    | Meaning                                                        |

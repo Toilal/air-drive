@@ -19,17 +19,24 @@ Design constraints:
   files it has emblemed so Nautilus re-queries them. All GTK calls are
   marshalled back to the main loop via ``GLib.idle_add``.
 
+It also adds context-menu actions (``Nautilus.MenuProvider``): **Open in Google
+Drive** / **Copy Drive link** on a tracked item, and **Pause / Resume air-drive
+sync** in the background of a folder within the synced tree.
+
 Protocol (line-based, see the daemon's control server):
 
 - ``status-dir <absolute-dir>\\n`` → one ``<token>\\t<name>\\n`` line per tracked
   child, then the connection closes.
 - ``status-path <absolute-path>\\n`` → one status token (fallback).
+- ``drive-url <absolute-path>\\n`` → the Drive browser URL, or ``unknown``.
+- ``pause-state\\n`` → ``paused`` | ``running``; ``pause`` / ``resume`` toggle it.
 - ``subscribe\\n`` → a long-lived stream emitting ``changed\\n`` on each activity.
 
 Tokens: ``synced`` | ``syncing`` | ``pending`` | ``conflict`` | ``ignored`` |
 ``unknown``.
 """
 
+import json
 import os
 import socket
 import threading
@@ -47,7 +54,17 @@ for _ver in ("4.1", "4.0", "3.0"):
     except ValueError:
         continue
 
-from gi.repository import GLib, GObject, Nautilus  # noqa: E402  (after require_version)
+from gi.repository import GLib, Gio, GObject, Nautilus  # noqa: E402  (after require_version)
+
+# Gdk (for the clipboard) is only needed by the "Copy Drive link" action; guard
+# it so a missing/old Gdk just disables that one item rather than the extension.
+try:
+    gi.require_version("Gdk", "4.0")
+    from gi.repository import Gdk  # noqa: E402
+
+    _HAVE_GDK = True
+except (ValueError, ImportError):
+    _HAVE_GDK = False
 
 # Map a daemon status token to a freedesktop emblem icon name. Tokens with no
 # entry (``ignored``, ``unknown``) intentionally get no emblem.
@@ -71,6 +88,63 @@ _DIR_CACHE_TTL_SECONDS = 2.0
 # How long the subscriber waits before reconnecting after the stream drops or
 # the daemon isn't running yet.
 _RECONNECT_DELAY_SECONDS = 3.0
+
+# Extensions of the daemon's native-Google-Doc shortcut files (see
+# reconcile::shortcut). Each is a small JSON file carrying the doc's web URL.
+_SHORTCUT_EXTENSIONS = frozenset(
+    ("gdoc", "gsheet", "gslides", "gdraw", "gform", "gscript", "gsite", "gjam", "gmap", "glink")
+)
+
+# Menu strings, translated for the languages we ship. The desktop locale picks
+# the table; anything unsupported falls back to English. A built-in table keeps
+# the extension a single self-contained file (no gettext .mo to compile/ship);
+# add a language by adding a block with the same keys.
+_STRINGS = {
+    "en": {
+        "open_in_drive": "Open in Google Drive",
+        "open_gdoc": "Open Google Doc",
+        "open_tip": "Open this item in your browser",
+        "copy_link": "Copy Drive link",
+        "copy_tip": "Copy this item's Drive link to the clipboard",
+        "pause": "Pause air-drive sync",
+        "resume": "Resume air-drive sync",
+    },
+    "fr": {
+        "open_in_drive": "Ouvrir dans Google Drive",
+        "open_gdoc": "Ouvrir le Google Doc",
+        "open_tip": "Ouvrir cet élément dans le navigateur",
+        "copy_link": "Copier le lien Drive",
+        "copy_tip": "Copier le lien Drive dans le presse-papier",
+        "pause": "Mettre la synchro air-drive en pause",
+        "resume": "Reprendre la synchro air-drive",
+    },
+    "es": {
+        "open_in_drive": "Abrir en Google Drive",
+        "open_gdoc": "Abrir el documento de Google",
+        "open_tip": "Abrir este elemento en el navegador",
+        "copy_link": "Copiar el enlace de Drive",
+        "copy_tip": "Copiar el enlace de Drive al portapapeles",
+        "pause": "Pausar la sincronización de air-drive",
+        "resume": "Reanudar la sincronización de air-drive",
+    },
+}
+
+
+def _ui_lang():
+    """Two-letter UI language from the desktop locale, restricted to what we
+    ship; English otherwise. Honours `LANGUAGE` (a `:`-list) then `LC_*`/`LANG`."""
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        value = os.environ.get(var)
+        if value:
+            code = value.split(":")[0].split(".")[0].split("_")[0].lower()
+            if code in _STRINGS:
+                return code
+    return "en"
+
+
+def _t(key):
+    """Translate a menu string key for the current desktop language."""
+    return _STRINGS.get(_ui_lang(), _STRINGS["en"]).get(key, _STRINGS["en"][key])
 
 
 def _socket_path():
@@ -140,7 +214,39 @@ def _query_dir(dir_path):
     return out
 
 
-class AirDriveOverlay(GObject.GObject, Nautilus.InfoProvider):
+def _shortcut_url(path):
+    """If `path` is a native-Google-Doc shortcut file, return the web URL stored
+    in it, else ``None``. Reads the file directly — works with no daemon."""
+    ext = path.rsplit(".", 1)[-1].lower() if "." in os.path.basename(path) else ""
+    if ext not in _SHORTCUT_EXTENSIONS:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            url = json.load(handle).get("url")
+    except (OSError, ValueError):
+        return None
+    return url if isinstance(url, str) and url else None
+
+
+def _request_line(command):
+    """Send one control-socket command and return its one-line reply (stripped),
+    or ``None`` on any error / no daemon."""
+    sock_path = _socket_path()
+    if sock_path is None:
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(_PATH_TIMEOUT_SECONDS)
+            sock.connect(sock_path)
+            sock.sendall(command.encode("utf-8") + b"\n")
+            reply = sock.recv(4096)
+    except OSError:
+        return None
+    line = reply.decode("utf-8", "replace").strip()
+    return line or None
+
+
+class AirDriveOverlay(GObject.GObject, Nautilus.InfoProvider, Nautilus.MenuProvider):
     """Sets a sync-status emblem on files tracked by air-drive, kept live."""
 
     def __init__(self):
@@ -219,3 +325,83 @@ class AirDriveOverlay(GObject.GObject, Nautilus.InfoProvider):
         for file in list(self._seen.values()):
             file.invalidate_extension_info()
         return GLib.SOURCE_REMOVE  # run once per idle scheduling
+
+    # --- context-menu actions -------------------------------------------------
+
+    def get_file_items(self, files):
+        """Right-click on a single tracked file/folder: open it on Drive or copy
+        its link. Hidden for multi-selection and untracked paths.
+
+        A native-Google-Doc shortcut (`.gdoc`/`.gsheet`/…) opens via the URL
+        stored in the file itself, so it works even with no daemon running and is
+        labelled "Open Google Doc"."""
+        if len(files) != 1 or files[0].get_uri_scheme() != "file":
+            return []
+        location = files[0].get_location()
+        path = location.get_path() if location is not None else None
+        if not path:
+            return []
+
+        shortcut = _shortcut_url(path)
+        if shortcut is not None:
+            url, open_label = shortcut, _t("open_gdoc")
+        else:
+            url, open_label = _request_line("drive-url " + path), _t("open_in_drive")
+            if not url or url == "unknown":
+                return []
+
+        open_item = Nautilus.MenuItem(
+            name="AirDrive::open_in_drive",
+            label=open_label,
+            tip=_t("open_tip"),
+        )
+        open_item.connect("activate", self._open_uri, url)
+        items = [open_item]
+
+        if _HAVE_GDK:
+            copy_item = Nautilus.MenuItem(
+                name="AirDrive::copy_link",
+                label=_t("copy_link"),
+                tip=_t("copy_tip"),
+            )
+            copy_item.connect("activate", self._copy_text, url)
+            items.append(copy_item)
+        return items
+
+    def get_background_items(self, folder):
+        """Right-click in the background of a folder inside the synced tree:
+        pause or resume air-drive. Hidden elsewhere and when no daemon answers."""
+        location = folder.get_location()
+        path = location.get_path() if location is not None else None
+        if not path:
+            return []
+        # Only inside the mapped tree (the root or a tracked subfolder).
+        if _request_line("status-path " + path) in (None, "unknown"):
+            return []
+        state = _request_line("pause-state")
+        if state is None:
+            return []
+        if state == "paused":
+            item = Nautilus.MenuItem(name="AirDrive::resume", label=_t("resume"))
+            item.connect("activate", self._send, "resume")
+        else:
+            item = Nautilus.MenuItem(name="AirDrive::pause", label=_t("pause"))
+            item.connect("activate", self._send, "pause")
+        return [item]
+
+    def _open_uri(self, _menu_item, url):
+        try:
+            Gio.AppInfo.launch_default_for_uri(url, None)
+        except GLib.Error:
+            pass
+
+    def _copy_text(self, _menu_item, text):
+        try:
+            display = Gdk.Display.get_default()
+            if display is not None:
+                display.get_clipboard().set(text)
+        except Exception:
+            pass
+
+    def _send(self, _menu_item, command):
+        _request_line(command)
