@@ -66,13 +66,17 @@ try:
 except (ValueError, ImportError):
     _HAVE_GDK = False
 
-# Map a daemon status token to a freedesktop emblem icon name. Tokens with no
-# entry (``ignored``, ``unknown``) intentionally get no emblem.
+# Map a daemon status token to a freedesktop emblem icon name. ``unknown`` (not
+# tracked / outside the mapping) intentionally gets no emblem. ``ignored`` covers
+# native-Google-Doc shortcuts (.gdoc/.gsheet/…): they aren't synced as bytes but
+# the shortcut faithfully mirrors an existing remote doc, so it's shown as synced
+# like its siblings rather than left blank.
 _EMBLEM_FOR_STATUS = {
     "synced": "emblem-default",
     "syncing": "emblem-synchronizing",
     "pending": "emblem-synchronizing",
     "conflict": "emblem-important",
+    "ignored": "emblem-default",
 }
 
 # Round-trip ceilings. Local socket answers in well under a millisecond; these
