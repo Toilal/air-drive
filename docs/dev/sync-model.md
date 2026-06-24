@@ -35,11 +35,12 @@ A **within-tree rename** arrives from inotify as a correlated `From`+`To` pair
 (matched by cookie) and becomes a single `Renamed` event. A **move out of the
 watched tree** — most commonly a desktop file manager moving a file to the
 trash — is a lone `From` with no matching `To`. The watcher buffers each `From`
-for `RENAME_CORRELATION_TTL` (5 s); a buffered `From` that never gets its `To`
-is emitted as a `Deleted` (so the deletion propagates to Drive), driven either
-by the next event's sweep or, on an otherwise quiet tree, by a small reaper
-task. This keeps "send to trash" on the prompt event-driven path instead of
-waiting for the safety-net reconcile.
+for `RENAME_CORRELATION_TTL` (1 s — the halves of a real rename arrive together,
+so this is a generous margin that also bounds detection latency); a buffered
+`From` that never gets its `To` is emitted as a `Deleted` (so the deletion
+propagates to Drive), driven either by the next event's sweep or, on an
+otherwise quiet tree, by a small reaper task. This keeps "send to trash" on the
+prompt event-driven path instead of waiting for the safety-net reconcile.
 
 ### Remote side — changes.list + pageToken
 
