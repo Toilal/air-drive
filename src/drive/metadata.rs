@@ -222,6 +222,17 @@ pub async fn create_folder(http: &DriveHttp, parent_id: &str, name: &str) -> Res
     meta_from_json(&v)
 }
 
+/// Move a Drive file or folder to the trash by id (recoverable for ~30 days).
+/// Used to propagate a deletion under the `trash` policy; the `permanent` policy
+/// uses `files.delete` (via [`DriveHttp::delete`]) instead. Idempotent: trashing
+/// an already-trashed item is a no-op on Drive's side.
+pub async fn trash(http: &DriveHttp, id: &str) -> Result<()> {
+    let body = serde_json::json!({ "trashed": true });
+    http.patch_json(&format!("files/{id}"), &[("fields", "id")], &body)
+        .await?;
+    Ok(())
+}
+
 /// Resolve the `<remote-folder>` argument of `air-drive map`:
 ///
 /// - URL like `https://drive.google.com/drive/folders/<id>` → ID extracted

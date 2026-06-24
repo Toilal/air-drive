@@ -29,6 +29,9 @@ self-skip when the required env vars are missing.
 | `e8_remote_dir_rename_propagates_locally` | A folder renamed on Drive moves the local dir (continuous daemon, #7). |
 | `e9_remote_trash_then_restore_does_not_duplicate` | A file trashed on Drive is removed locally; restoring re-links it with no duplicate, same id (#8). |
 | `e10_native_google_doc_becomes_local_shortcut` | A native Google Doc on Drive becomes a local `.gdoc` shortcut and is never uploaded back (#3). |
+| `e11_remote_new_folder_with_file_syncs_locally` | A new Drive folder containing a file is created locally with its contents. |
+| `e12_local_new_folder_with_file_syncs_to_drive` | A new local folder + nested file (racing the recursive-watch registration) syncs to Drive. |
+| `e13_local_delete_trashes_on_drive` | A local delete propagates to Drive as a **trash** (default policy): the file leaves the listing but stays recoverable with `trashed=true`, not permanently deleted. |
 
 ## Required env vars
 

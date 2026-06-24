@@ -66,6 +66,16 @@ create_dir_local  create_dir_remote
 mark_conflict
 ```
 
+`delete_remote` (and the directory variant) is addressed **by Drive id**, not by
+path: the engine PATCHes `trashed=true` or issues a `files.delete`, depending on
+[`[sync].remote_deletes`](../user/configuration.md#sync--synchronisation-policy)
+(default `trash`, recoverable). It is **not** routed through `rclone` — rclone's
+Drive backend addresses by path, so it cannot locate an object given only its id
+(the same reason `rename_remote` goes straight to the Drive API). The trashed/
+deleted echo that later returns from `changes.list` is dropped by the `in_flight`
+tracker, which is consulted before both the `removed` and `trashed` branches of
+`apply_remote`.
+
 ## Echo suppression
 
 When air-drive uploads a file, Drive's `changes.list` will later report that

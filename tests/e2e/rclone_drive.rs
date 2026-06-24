@@ -819,6 +819,90 @@ async fn e12_local_new_folder_with_file_syncs_to_drive() {
 }
 
 // ---------------------------------------------------------------------------
+// E13 — a local delete propagates to Drive as a trash, not a permanent delete
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "e2e: requires real Drive credentials"]
+async fn e13_local_delete_trashes_on_drive() {
+    use std::time::Duration;
+    skip_unless_configured!(cfg);
+    let fx = common::E2eFixture::new(cfg).await;
+
+    // A file present locally before start; initial sync uploads it to Drive.
+    let content = b"delete me";
+    std::fs::write(fx.local_dir.join("doomed.txt"), content).expect("write doomed.txt");
+
+    seed_account_and_mapping(&fx);
+    let mut daemon = common::DaemonProcess::spawn(&fx, &["--remote-poll-interval", "15"]).await;
+
+    // Wait for the upload, then capture the Drive id.
+    let uploaded = common::wait_until(Duration::from_secs(120), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| cs.iter().any(|c| c.name == "doomed.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        uploaded,
+        "doomed.txt should upload to Drive; alive? {:?}",
+        daemon.poll_alive()
+    );
+    let id = metadata::list_children(&fx.drive, &fx.run_folder_id)
+        .await
+        .expect("list run folder")
+        .into_iter()
+        .find(|c| c.name == "doomed.txt")
+        .expect("doomed.txt on Drive")
+        .id;
+
+    // Gate on the live watcher (control socket) so the delete is caught by
+    // inotify, not a later startup scan.
+    let control_sock = fx.config_dir.join("runtime/control.sock");
+    let watcher_live = common::wait_until(Duration::from_secs(90), || {
+        let p = control_sock.clone();
+        async move { p.exists() }
+    })
+    .await;
+    assert!(
+        watcher_live,
+        "the daemon should bind its control socket (watcher attached) before the delete; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // Delete locally — default policy must trash (recoverable), not purge.
+    std::fs::remove_file(fx.local_dir.join("doomed.txt")).expect("remove doomed.txt");
+
+    // It leaves the non-trashed listing (`list_children` filters trashed=false)...
+    let gone_from_listing = common::wait_until(Duration::from_secs(120), || async {
+        metadata::list_children(&fx.drive, &fx.run_folder_id)
+            .await
+            .map(|cs| !cs.iter().any(|c| c.name == "doomed.txt"))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        gone_from_listing,
+        "doomed.txt should leave the live Drive listing; alive? {:?}",
+        daemon.poll_alive()
+    );
+
+    // ...but remains recoverable: still present with trashed=true, NOT purged.
+    let raw = metadata::get_file_raw(&fx.drive, &id, "id,trashed")
+        .await
+        .expect("get_file_raw for trashed check");
+    assert_eq!(
+        raw.get("trashed").and_then(|v| v.as_bool()),
+        Some(true),
+        "doomed.txt should be trashed (recoverable), not permanently deleted"
+    );
+
+    daemon.shutdown().await;
+    fx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

@@ -87,7 +87,10 @@ pub async fn build_engine(
     no_download_rclone: bool,
 ) -> Result<Arc<dyn SyncEngine>> {
     if std::env::var("AIR_DRIVE_TEST_ENGINE").as_deref() == Ok("http") {
-        return Ok(Arc::new(HttpEngine::new(http.clone())));
+        return Ok(Arc::new(HttpEngine::new(
+            http.clone(),
+            cfg.sync.remote_deletes,
+        )));
     }
     let binary = rclone_path::resolve(&cfg.rclone, paths.cache(), !no_download_rclone).await?;
     Ok(Arc::new(RcloneEngine::new(
@@ -97,5 +100,6 @@ pub async fn build_engine(
         cfg.oauth.client_secret.clone(),
         local_root,
         http.clone(),
+        cfg.sync.remote_deletes,
     )))
 }

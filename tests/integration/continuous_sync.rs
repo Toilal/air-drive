@@ -134,13 +134,15 @@ async fn us2_1_local_delete_propagates() {
 
     std::fs::remove_file(fx.local_dir.join("ephemeral.txt")).unwrap();
 
-    let gone = wait_until(T_LOCAL_TO_REMOTE, || async {
+    let trashed = wait_until(T_LOCAL_TO_REMOTE, || async {
         let st = mock.state.lock().unwrap();
-        !st.files.contains_key(&remote_id)
+        // Default policy is recoverable: the remote file stays in `files` but is
+        // flagged trashed, rather than being permanently removed.
+        st.files.get(&remote_id).is_some_and(|f| f.trashed)
     })
     .await;
     assert!(
-        gone,
+        trashed,
         "remote file should be trashed within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
         daemon.poll_alive()
     );
@@ -670,15 +672,16 @@ async fn us2_6_local_dir_delete_propagates() {
 
     // Now remove it locally — the delete must propagate to Drive.
     std::fs::remove_dir(fx.local_dir.join("doomeddir")).unwrap();
-    let gone = wait_until(T_LOCAL_TO_REMOTE, || async {
+    let trashed = wait_until(T_LOCAL_TO_REMOTE, || async {
         let st = mock.state.lock().unwrap();
-        !st.files
+        // Recoverable default: the folder stays in `files`, flagged trashed.
+        st.files
             .values()
-            .any(|f| f.is_folder() && f.name == "doomeddir")
+            .any(|f| f.is_folder() && f.name == "doomeddir" && f.trashed)
     })
     .await;
     assert!(
-        gone,
+        trashed,
         "remote folder should be trashed within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
         daemon.poll_alive()
     );
@@ -1260,7 +1263,8 @@ async fn us2_10_startup_scan_replays_offline_local_changes() {
         let created = d
             .iter()
             .any(|(p, f)| p == "fresh.txt" && f.content == b"new-offline");
-        let deleted = !st.files.contains_key(&gone_id);
+        // Recoverable default: the offline-deleted file is trashed, not purged.
+        let deleted = st.files.get(&gone_id).is_some_and(|f| f.trashed);
         modified && created && deleted
     })
     .await;

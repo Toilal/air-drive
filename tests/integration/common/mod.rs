@@ -674,6 +674,12 @@ impl Respond for FilePatchResponder {
         if let Some(new_name) = body.get("name").and_then(Value::as_str) {
             f.name = new_name.to_owned();
         }
+        // `{ "trashed": true }` is how a deletion is propagated under the default
+        // (recoverable) policy. The file stays in `files`; `changes.list`
+        // surfaces it with `trashed = true`, mirroring real Drive.
+        if let Some(trashed) = body.get("trashed").and_then(Value::as_bool) {
+            f.trashed = trashed;
+        }
         // `addParents` / `removeParents` come as query params, comma-separated.
         if let Some((_, parents)) = req.url.query_pairs().find(|(k, _)| k == "addParents") {
             if let Some(p) = parents.split(',').next() {

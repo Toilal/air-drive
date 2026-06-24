@@ -19,7 +19,10 @@
 //! - **move_remote**: Drive `files.update` via `DriveHttp` (rename + reparent) —
 //!   a metadata-only op; rclone addresses Drive by path, not id, so `moveto`
 //!   cannot locate a source given only its id.
-//! - **delete_remote**: `rclone delete airdrive:<id>` (Drive trash)
+//! - **delete_remote**: by id via `DriveHttp` — a `trashed=true` PATCH (default,
+//!   recoverable) or a `files.delete` (permanent), per `[sync].remote_deletes`.
+//!   Not rclone: it addresses Drive by path, not id, so `rclone delete` cannot
+//!   locate a file given only its id (same reasoning as move_remote).
 //!
 //! **Token handoff**: [`TokenProvider::rclone_token`] supplies the access token, its
 //! real expiry, and — when available — the refresh token. With the refresh token plus
@@ -35,6 +38,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use crate::config::RemoteDeleteMode;
 use crate::drive::auth::{RcloneToken, TokenProvider};
 use crate::drive::http::DriveHttp;
 use crate::engine::staging;
@@ -91,8 +95,12 @@ pub struct RcloneEngine {
     /// Watched local root, used as the base for [`staging::stage_path`] on downloads.
     local_root: PathBuf,
     /// Shared Drive REST client. Used for the metadata lookup that precedes
-    /// every `download` (rclone Drive addresses by path; we have the id).
+    /// every `download` (rclone Drive addresses by path; we have the id), and
+    /// for the id-addressed delete/trash that rclone cannot express.
     http: DriveHttp,
+    /// How a propagated deletion removes the remote object: trash (recoverable)
+    /// or permanent. From `[sync].remote_deletes`.
+    delete_mode: RemoteDeleteMode,
 }
 
 impl std::fmt::Debug for RcloneEngine {
@@ -115,6 +123,7 @@ impl RcloneEngine {
     /// - `client_secret` — companion `client_secret` from `Config.oauth.client_secret`,
     ///   passed to rclone so it can self-refresh the token during long transfers.
     /// - `local_root` — watched local folder; used as the base for staged downloads.
+    /// - `delete_mode` — trash vs permanent deletion, from `[sync].remote_deletes`.
     pub fn new(
         binary: RcloneBinary,
         token_provider: Arc<dyn TokenProvider>,
@@ -122,6 +131,7 @@ impl RcloneEngine {
         client_secret: Option<String>,
         local_root: PathBuf,
         http: DriveHttp,
+        delete_mode: RemoteDeleteMode,
     ) -> Self {
         Self {
             binary,
@@ -130,6 +140,7 @@ impl RcloneEngine {
             client_secret,
             local_root,
             http,
+            delete_mode,
         }
     }
 
@@ -465,10 +476,15 @@ impl SyncEngine for RcloneEngine {
     }
 
     async fn delete_remote(&self, remote_id: &str) -> Result<()> {
-        let mut cmd = self.base_command().await?;
-        cmd.arg("delete").arg(format!("{REMOTE_NAME}:{remote_id}"));
-        self.run(cmd).await?;
-        Ok(())
+        // Address by id via the Drive API, not rclone: rclone addresses Drive by
+        // path, so `rclone delete airdrive:<id>` treats the id as a path, fails
+        // to resolve it, and reports "directory not found". This mirrors
+        // `remove_dir_remote` and `HttpEngine::delete_remote`, keeping the two
+        // engines substitutable (principle IV).
+        match self.delete_mode {
+            RemoteDeleteMode::Trash => crate::drive::metadata::trash(&self.http, remote_id).await,
+            RemoteDeleteMode::Permanent => self.http.delete(&format!("files/{remote_id}")).await,
+        }
     }
 
     async fn create_dir_remote(&self, remote_parent_id: &str, name: &str) -> Result<RemoteFile> {
@@ -487,9 +503,13 @@ impl SyncEngine for RcloneEngine {
     }
 
     async fn remove_dir_remote(&self, remote_id: &str) -> Result<()> {
-        // `rclone delete` removes files, not a directory itself; a Drive
-        // `files.delete` by id trashes the (expected-empty) folder directly.
-        self.http.delete(&format!("files/{remote_id}")).await
+        // `rclone delete` removes files, not a directory itself; address the
+        // (expected-empty) folder by id via the Drive API, honouring the same
+        // trash-vs-permanent policy as file deletes.
+        match self.delete_mode {
+            RemoteDeleteMode::Trash => crate::drive::metadata::trash(&self.http, remote_id).await,
+            RemoteDeleteMode::Permanent => self.http.delete(&format!("files/{remote_id}")).await,
+        }
     }
 
     async fn bulk_download(
@@ -611,6 +631,7 @@ mod tests {
             None,
             PathBuf::from("/tmp/root"),
             http,
+            RemoteDeleteMode::Trash,
         );
         assert_eq!(engine.binary().version, "1.65.0");
         assert_eq!(engine.binary().source, RcloneSource::Path);
@@ -706,6 +727,7 @@ mod tests {
             Some("csecret".to_owned()),
             PathBuf::from("/tmp/root"),
             test_http(),
+            RemoteDeleteMode::Trash,
         );
         let cmd = engine.base_command().await.unwrap();
         let env = env_map(&cmd);
@@ -761,6 +783,8 @@ mod tests {
             None,
             PathBuf::from("/tmp/root"),
             http,
+            // Permanent so remove_dir_remote issues the DELETE this test mocks.
+            RemoteDeleteMode::Permanent,
         );
 
         let rf = engine
@@ -775,6 +799,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_remote_trash_mode_patches_trashed_not_deletes() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Default (Trash) mode must PATCH `trashed=true` by id, never DELETE.
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/files/file-abc"))
+            .and(body_json(serde_json::json!({ "trashed": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "file-abc",
+            })))
+            .mount(&server)
+            .await;
+
+        let token = Arc::new(StaticToken::new("t"));
+        let http = DriveHttp::with_bases(token.clone(), server.uri(), server.uri()).unwrap();
+        let engine = RcloneEngine::new(
+            dummy_binary(),
+            token,
+            None,
+            None,
+            PathBuf::from("/tmp/root"),
+            http,
+            RemoteDeleteMode::Trash,
+        );
+
+        // No DELETE mock is mounted: if the engine issued one, wiremock would 404
+        // and `delete_remote` would error. A clean return proves it PATCHed.
+        engine.delete_remote("file-abc").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn base_command_omits_client_secret_when_absent() {
         let engine = RcloneEngine::new(
             dummy_binary(),
@@ -783,6 +840,7 @@ mod tests {
             None,
             PathBuf::from("/tmp/root"),
             test_http(),
+            RemoteDeleteMode::Trash,
         );
         let cmd = engine.base_command().await.unwrap();
         let env = env_map(&cmd);
