@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MIME type for air-drive's native-Google-Doc shortcut files. Each is a small
+  JSON document carrying the doc's web URL (see reconcile::shortcut). Without
+  this they sniff as text/plain and double-click opens a text editor; with it
+  they get a dedicated handler that opens the link in the browser.
+
+  The globs use a high weight so the extension match beats the text/plain
+  content sniff. Installed to ~/.local/share/mime/packages/ by
+  `air-drive shell install`, then `update-mime-database`.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.air-drive.shortcut">
+    <comment>air-drive Google Drive shortcut</comment>
+    <comment xml:lang="fr">Raccourci Google Drive air-drive</comment>
+    <comment xml:lang="es">Acceso directo de Google Drive de air-drive</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.gdoc" weight="80"/>
+    <glob pattern="*.gsheet" weight="80"/>
+    <glob pattern="*.gslides" weight="80"/>
+    <glob pattern="*.gdraw" weight="80"/>
+    <glob pattern="*.gform" weight="80"/>
+    <glob pattern="*.gscript" weight="80"/>
+    <glob pattern="*.gsite" weight="80"/>
+    <glob pattern="*.gjam" weight="80"/>
+    <glob pattern="*.gmap" weight="80"/>
+    <glob pattern="*.glink" weight="80"/>
+  </mime-type>
+</mime-info>

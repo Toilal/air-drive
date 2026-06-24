@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=air-drive — Open Google document
+Name[fr]=air-drive — Ouvrir le document Google
+Name[es]=air-drive — Abrir el documento de Google
+Comment=Open the linked Google document in your browser
+Comment[fr]=Ouvrir le document Google lié dans le navigateur
+Comment[es]=Abrir el documento de Google enlazado en el navegador
+Exec=__AIRDRIVE_BIN__ open-shortcut %f
+Terminal=false
+NoDisplay=true
+MimeType=application/vnd.air-drive.shortcut;

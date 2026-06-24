@@ -144,6 +144,14 @@ pub enum Command {
         #[command(subcommand)]
         action: shell::ShellAction,
     },
+    /// Open the Google link a native-Doc shortcut (`.gdoc`/`.gsheet`/…) points
+    /// to. Invoked by the desktop file association `shell install` registers;
+    /// not meant to be run by hand.
+    #[command(hide = true)]
+    OpenShortcut {
+        /// Path to the shortcut file.
+        path: PathBuf,
+    },
 }
 
 /// Exit codes documented in the README.
@@ -219,6 +227,7 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
         }
         Command::Init { force, link } => init::run(cli.config_dir.as_deref(), force, link).await,
         Command::Shell { action } => shell::run(cli.config_dir.as_deref(), action).await,
+        Command::OpenShortcut { path } => shell::open_shortcut(&path),
     }
 }
 
