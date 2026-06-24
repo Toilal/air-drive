@@ -26,17 +26,22 @@ use crate::error::{Error, Result};
 
 /// How long a buffered rename `From` half-event waits for its matching `To`
 /// before being treated as a move *out* of the watched tree. Linux inotify
-/// delivers `From`, `To` and `Both` for a within-tree rename in the same batch,
-/// so the match is effectively instant; a `From` that lingers past this TTL had
-/// no `To` follow it, i.e. the file was moved out of the tree (most commonly
-/// into the desktop trash) — equivalent to a deletion, so it is emitted as
-/// [`WatchEvent::Deleted`] rather than silently dropped.
-const RENAME_CORRELATION_TTL: Duration = Duration::from_secs(5);
+/// delivers `From`, `To` and `Both` for a within-tree rename in the same read
+/// batch, so the match is effectively instant (sub-millisecond); a `From` that
+/// lingers past this TTL had no `To` follow it, i.e. the file was moved out of
+/// the tree (most commonly into the desktop trash) — equivalent to a deletion,
+/// so it is emitted as [`WatchEvent::Deleted`] rather than silently dropped.
+///
+/// This value is also the latency floor for detecting such a move, so it is kept
+/// short. 1 s is a ~100–1000× margin over the real correlation gap while making
+/// "send to trash" feel near-instant; too short risks a within-tree rename whose
+/// `To` is delayed under load being mis-emitted as a delete-then-create.
+const RENAME_CORRELATION_TTL: Duration = Duration::from_secs(1);
 
 /// How often the rename reaper task scans for `From` halves that have outlived
 /// [`RENAME_CORRELATION_TTL`]. Bounds how late a move-out-of-tree deletion is
 /// emitted on an otherwise quiet tree (worst case TTL + this interval).
-const RENAME_REAP_INTERVAL: Duration = Duration::from_secs(1);
+const RENAME_REAP_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Rename `From` halves buffered by tracker (cookie), shared between the notify
 /// callback (which inserts/correlates) and the reaper task (which times out
