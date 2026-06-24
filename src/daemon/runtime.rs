@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::daemon::in_flight::InFlightOps;
@@ -65,6 +65,10 @@ pub async fn run(
     cancel: CancellationToken,
     in_flight: InFlightOps,
     pause: PauseState,
+    // Pulsed after a drain cycle that completed at least one op, so the shell
+    // overlay can refresh emblems live (see `daemon::file_status`). Best-effort:
+    // `send` errors (no subscribers) are ignored.
+    activity: broadcast::Sender<()>,
 ) -> Result<()> {
     loop {
         // Block cooperatively while paused. `wait_for_resume` returns instantly
@@ -93,6 +97,7 @@ pub async fn run(
             }
         }
         // Drain everything that's due before sleeping.
+        let mut did_work = false;
         loop {
             let Some(op) = ops::next_due(db.connection(), unix_now()).await? else {
                 break;
@@ -132,6 +137,9 @@ pub async fn run(
             .await
             {
                 Ok(()) => {
+                    // A completed op changed a file's state (synced / gone /
+                    // renamed) — flag the cycle so the overlay refreshes.
+                    did_work = true;
                     // Bump the last_sync_at + items_uploaded / items_downloaded
                     // counters that `air-drive status` surfaces.
                     // Upload/RenameRemote count as uploaded; Download as
@@ -212,6 +220,11 @@ pub async fn run(
                     }
                 }
             }
+        }
+
+        // Tell subscribers (the shell overlay) a file's state changed.
+        if did_work {
+            let _ = activity.send(());
         }
 
         tokio::select! {

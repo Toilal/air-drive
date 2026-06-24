@@ -13,6 +13,7 @@ pub mod pause;
 pub mod resume;
 pub mod runtime;
 pub mod setup;
+pub mod shell;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -136,6 +137,13 @@ pub enum Command {
         #[arg(long)]
         link: bool,
     },
+    /// Manage desktop shell integration: per-file sync-status emblems in the
+    /// file manager (GNOME Files / Nautilus on Linux).
+    Shell {
+        /// What to do: `install`, `uninstall`, or `status`.
+        #[command(subcommand)]
+        action: shell::ShellAction,
+    },
 }
 
 /// Exit codes documented in the README.
@@ -210,6 +218,7 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
             .await
         }
         Command::Init { force, link } => init::run(cli.config_dir.as_deref(), force, link).await,
+        Command::Shell { action } => shell::run(cli.config_dir.as_deref(), action).await,
     }
 }
 
@@ -295,6 +304,36 @@ mod tests {
     fn parses_status_json() {
         let cli = Cli::try_parse_from(["air-drive", "status", "--json"]).expect("status parses");
         assert!(matches!(cli.command, Command::Status { json: true }));
+    }
+
+    #[test]
+    fn parses_shell_subcommands() {
+        let cli = Cli::try_parse_from(["air-drive", "shell", "install", "--skip-deps"])
+            .expect("shell install parses");
+        assert!(matches!(
+            cli.command,
+            Command::Shell {
+                action: shell::ShellAction::Install { skip_deps: true }
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["air-drive", "shell", "uninstall"])
+            .expect("shell uninstall parses");
+        assert!(matches!(
+            cli.command,
+            Command::Shell {
+                action: shell::ShellAction::Uninstall
+            }
+        ));
+
+        let cli =
+            Cli::try_parse_from(["air-drive", "shell", "status"]).expect("shell status parses");
+        assert!(matches!(
+            cli.command,
+            Command::Shell {
+                action: shell::ShellAction::Status
+            }
+        ));
     }
 
     #[test]

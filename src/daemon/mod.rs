@@ -6,6 +6,7 @@
 //! token, the loops drain whatever's in flight, and the function returns
 //! cleanly. Tests use this to validate the continuous-sync user story.
 
+pub mod file_status;
 pub mod in_flight;
 pub mod lock;
 pub mod pause;
@@ -93,6 +94,12 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
     // the dispatcher loop (which sleeps cooperatively on it).
     let pause_state = PauseState::new();
 
+    // Sync-activity signal: pulsed whenever a file's state changes (a local or
+    // remote event reconciled, or an op completed). The control socket's
+    // `subscribe` command forwards it so the desktop overlay refreshes emblems
+    // live. Bounded; a lagging subscriber just gets a coalesced refresh.
+    let (activity_tx, _) = tokio::sync::broadcast::channel::<()>(64);
+
     let (raw_tx, raw_rx) = mpsc::channel::<WatchEvent>(1024);
     let (debounced_tx, mut debounced_rx) = mpsc::channel::<WatchEvent>(1024);
     let (remote_tx, mut remote_rx) = mpsc::channel::<RemoteBatch>(1024);
@@ -141,6 +148,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         let symlinks = ctx.symlinks;
         let wake_local = wake.clone();
         let cancel_local = cancel.clone();
+        let activity_local = activity_tx.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -152,6 +160,8 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                             tracing::warn!(error = %e, "apply_local failed");
                         } else {
                             wake_local.notify_one();
+                            // A local change set an item pending → refresh emblems.
+                            let _ = activity_local.send(());
                         }
                     }
                 }
@@ -185,6 +195,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         let wake_remote = wake.clone();
         let cancel_remote = cancel.clone();
         let in_flight_remote = in_flight.clone();
+        let activity_remote = activity_tx.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -205,6 +216,8 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                         }
                         if any_applied {
                             wake_remote.notify_one();
+                            // Remote changes touched item states → refresh emblems.
+                            let _ = activity_remote.send(());
                         }
                         // Advance the cursor ONLY when the whole batch applied —
                         // otherwise the poller re-fetches it next tick and the
@@ -232,6 +245,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         let cancel_dispatch = cancel.clone();
         let in_flight_dispatch = in_flight.clone();
         let pause_dispatch = pause_state.clone();
+        let activity_dispatch = activity_tx.clone();
         tokio::spawn(async move {
             if let Err(e) = runtime::run(
                 db,
@@ -243,6 +257,7 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
                 cancel_dispatch,
                 in_flight_dispatch,
                 pause_dispatch,
+                activity_dispatch,
             )
             .await
             {
@@ -251,13 +266,27 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         })
     };
 
-    // 6b. Control-socket server (pause / resume / status-snapshot).
+    // 6b. Control-socket server (pause / resume / status-snapshot / status-path).
     let control_task = {
         let cancel_ctl = cancel.clone();
         let state = pause_state.clone();
         let runtime_dir = ctx.runtime_dir.clone();
+        let db = ctx.db.clone();
+        let mapping_id = ctx.mapping_id;
+        let local_root = ctx.local_root.clone();
+        let activity_ctl = activity_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_control_server(runtime_dir, state, cancel_ctl).await {
+            if let Err(e) = run_control_server(
+                runtime_dir,
+                state,
+                db,
+                mapping_id,
+                local_root,
+                activity_ctl,
+                cancel_ctl,
+            )
+            .await
+            {
                 tracing::error!(error = %e, "control socket server exited with error");
             }
         })

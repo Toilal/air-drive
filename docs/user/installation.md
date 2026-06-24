@@ -87,6 +87,28 @@ errors), bootstrap your own Google Cloud client first — see
 air-drive init --link
 ```
 
+## File-manager integration (optional)
+
+On GNOME (Ubuntu's default), air-drive can show a per-file sync-status emblem in
+GNOME Files (Nautilus):
+
+```sh
+air-drive shell install   # installs the python3-nautilus bridge + the extension
+killall nautilus          # fully restart the file manager to load it
+```
+
+This installs the `python3-nautilus` system package (it prompts for `sudo` on a
+terminal, or prints the command to run) and deploys the extension under
+`~/.local/share/nautilus-python/extensions/`. Emblems appear on synced files,
+and on the sync folder itself when viewed from its parent (e.g. your Home
+folder). Remove it with `air-drive shell uninstall`; check what's detected with
+`air-drive shell status`.
+
+> A plain `nautilus -q` can leave a cached background instance running (GNOME
+> keeps Nautilus alive for the desktop), so prefer `killall nautilus` (or log
+> out and back in) when emblems don't refresh. See the
+> [CLI reference](cli.md#shell) for details.
+
 ## Next steps
 
 - [CLI reference](cli.md) for every command and flag.

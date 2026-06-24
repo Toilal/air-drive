@@ -7,10 +7,13 @@
 //!   `wait_for_resume()` to sleep cooperatively when paused. Clones share
 //!   the same underlying flag.
 //! - [`run_control_server`] — accepts connections on
-//!   `<runtime_dir>/control.sock` and handles three commands: `pause`,
-//!   `resume`, `status-snapshot`. Each command is one line; the response is
-//!   one line (`ok\n`, `not running\n`, etc.). UNIX-only by design — the
-//!   project is Linux-first per constitution principle V.
+//!   `<runtime_dir>/control.sock` and handles: `pause`, `resume`,
+//!   `status-snapshot`, `status-path <abs>` (per-file sync status for the
+//!   desktop overlay, see [`crate::daemon::file_status`]), and `subscribe`. The
+//!   first four are one line in / one line out; `subscribe` is a long-lived
+//!   stream that emits `changed\n` on every sync activity so the overlay
+//!   refreshes emblems live. UNIX-only by design — the project is Linux-first
+//!   per constitution principle V.
 //!
 //! Graceful shutdown is NOT a control-socket command: `air-drive stop` signals
 //! the daemon directly (SIGTERM via the lock-file PID), reusing the same signal
@@ -20,10 +23,13 @@ use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::file_status;
 use crate::error::{Error, Result};
+use crate::state::Db;
+use crate::state::mapping::MappingId;
 
 /// File name of the control socket inside the runtime directory.
 pub const CONTROL_SOCKET: &str = "control.sock";
@@ -87,6 +93,10 @@ pub fn socket_path(runtime_dir: &Path) -> PathBuf {
 pub async fn run_control_server(
     runtime_dir: PathBuf,
     state: PauseState,
+    db: Db,
+    mapping_id: MappingId,
+    local_root: PathBuf,
+    activity: broadcast::Sender<()>,
     cancel: CancellationToken,
 ) -> Result<()> {
     std::fs::create_dir_all(&runtime_dir)?;
@@ -112,8 +122,22 @@ pub async fn run_control_server(
                     }
                 };
                 let state = state.clone();
+                let db = db.clone();
+                let local_root = local_root.clone();
+                let activity = activity.clone();
+                let cancel_client = cancel.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, state).await {
+                    if let Err(e) = handle_client(
+                        stream,
+                        state,
+                        db,
+                        mapping_id,
+                        local_root,
+                        activity,
+                        cancel_client,
+                    )
+                    .await
+                    {
                         tracing::warn!(error = %e, "control client failed");
                     }
                 });
@@ -125,32 +149,70 @@ pub async fn run_control_server(
 }
 
 /// Handle one control connection: one request line in, one response line out.
-async fn handle_client(stream: UnixStream, state: PauseState) -> Result<()> {
+///
+/// `status-path <abs>` is special — the rest of the line after the first space
+/// is the (possibly space-containing) absolute path, so it isn't trimmed like
+/// the keyword commands.
+async fn handle_client(
+    stream: UnixStream,
+    state: PauseState,
+    db: Db,
+    mapping_id: MappingId,
+    local_root: PathBuf,
+    activity: broadcast::Sender<()>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     let mut line = String::new();
     reader.read_line(&mut line).await?;
-    let cmd = line.trim();
+    let line = line.trim_end_matches(['\n', '\r']);
 
-    let response: &str = match cmd {
-        "pause" => {
-            state.pause();
-            tracing::info!("daemon paused via control socket");
-            "ok\n"
+    // `subscribe` is a long-lived stream, not a one-shot: emit `changed\n`
+    // whenever sync activity occurs so the overlay re-queries. Held open until
+    // the client disconnects (write fails) or the daemon shuts down.
+    if line == "subscribe" {
+        let mut rx = activity.subscribe();
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                r = rx.recv() => {
+                    match r {
+                        // Coalesce a burst of ticks into a single refresh line.
+                        Ok(()) => while rx.try_recv().is_ok() {},
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                    if write.write_all(b"changed\n").await.is_err() {
+                        break;
+                    }
+                }
+            }
         }
-        "resume" => {
-            state.resume();
-            tracing::info!("daemon resumed via control socket");
-            "ok\n"
-        }
-        "status-snapshot" => {
-            // A richer snapshot reply (matching the JSON schema, with live
-            // counters) lands when we wire the daemon's accumulated
-            // `last_sync` + `last_error` state into the status path. For now,
-            // `air-drive status` reads the DB directly.
-            "{\"alive\":true}\n"
-        }
-        _ => "error: unknown command\n",
+        return Ok(());
+    }
+
+    let response: String = if line == "pause" {
+        state.pause();
+        tracing::info!("daemon paused via control socket");
+        "ok\n".to_owned()
+    } else if line == "resume" {
+        state.resume();
+        tracing::info!("daemon resumed via control socket");
+        "ok\n".to_owned()
+    } else if line == "status-snapshot" {
+        // A richer snapshot reply (matching the JSON schema, with live
+        // counters) lands when we wire the daemon's accumulated `last_sync` +
+        // `last_error` state into the status path. For now, `air-drive status`
+        // reads the DB directly.
+        "{\"alive\":true}\n".to_owned()
+    } else if let Some(path) = line.strip_prefix("status-path ") {
+        // Per-file status for the desktop overlay (see `file_status`).
+        let token = file_status::status_token(&db, mapping_id, &local_root, Path::new(path)).await;
+        format!("{token}\n")
+    } else {
+        "error: unknown command\n".to_owned()
     };
 
     write.write_all(response.as_bytes()).await?;
@@ -211,15 +273,64 @@ mod tests {
         assert!(res.is_ok(), "wait_for_resume never returned");
     }
 
+    /// Open a temp DB, seed one synced item under a known root, and return the
+    /// pieces the control server needs.
+    async fn server_fixture() -> (tempfile::TempDir, Db, MappingId, PathBuf) {
+        use crate::state::items::{self, ItemKind, ItemState, NewSyncItem};
+        use crate::state::{accounts, mapping};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("state.db")).await.unwrap();
+        let local_root = PathBuf::from("/home/u/Drive");
+        let account_id = accounts::upsert(db.connection(), "a@b.com", 1)
+            .await
+            .unwrap();
+        // `upsert` always yields MappingId(1).
+        let mapping_id = mapping::upsert(
+            db.connection(),
+            account_id,
+            &local_root.to_string_lossy(),
+            "rid",
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        items::insert(
+            db.connection(),
+            &NewSyncItem {
+                mapping_id,
+                relative_path: "notes.txt".into(),
+                kind: ItemKind::File,
+                remote_id: Some("rid".into()),
+                size: Some(1),
+                md5: Some("m".into()),
+                local_inode: None,
+                last_synced_at: 0,
+                state: ItemState::Synced,
+            },
+        )
+        .await
+        .unwrap();
+        (tmp, db, mapping_id, local_root)
+    }
+
     #[tokio::test]
     async fn control_server_round_trip_pause_resume() {
         let tmp = tempfile::tempdir().unwrap();
         let state = PauseState::new();
         let cancel = CancellationToken::new();
+        let (_db_tmp, db, mapping_id, local_root) = server_fixture().await;
+        let (activity, _) = broadcast::channel::<()>(8);
 
         let server = tokio::spawn(run_control_server(
             tmp.path().to_path_buf(),
             state.clone(),
+            db,
+            mapping_id,
+            local_root,
+            activity,
             cancel.clone(),
         ));
         // Give the server a beat to bind.
@@ -236,6 +347,85 @@ mod tests {
 
         let r = send_command(&sock, "garbage").await.unwrap();
         assert!(r.starts_with("error"), "got {r}");
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    }
+
+    #[tokio::test]
+    async fn control_server_answers_status_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PauseState::new();
+        let cancel = CancellationToken::new();
+        let (_db_tmp, db, mapping_id, local_root) = server_fixture().await;
+        let (activity, _) = broadcast::channel::<()>(8);
+
+        let server = tokio::spawn(run_control_server(
+            tmp.path().to_path_buf(),
+            state.clone(),
+            db,
+            mapping_id,
+            local_root,
+            activity,
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sock = socket_path(tmp.path());
+
+        // Tracked + synced.
+        let r = send_command(&sock, "status-path /home/u/Drive/notes.txt")
+            .await
+            .unwrap();
+        assert_eq!(r, "synced");
+
+        // Untracked path under the root.
+        let r = send_command(&sock, "status-path /home/u/Drive/other.txt")
+            .await
+            .unwrap();
+        assert_eq!(r, "unknown");
+
+        // Outside the mapped root.
+        let r = send_command(&sock, "status-path /etc/hosts").await.unwrap();
+        assert_eq!(r, "unknown");
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    }
+
+    #[tokio::test]
+    async fn control_server_subscribe_streams_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PauseState::new();
+        let cancel = CancellationToken::new();
+        let (_db_tmp, db, mapping_id, local_root) = server_fixture().await;
+        let (activity, _) = broadcast::channel::<()>(8);
+
+        let server = tokio::spawn(run_control_server(
+            tmp.path().to_path_buf(),
+            state.clone(),
+            db,
+            mapping_id,
+            local_root,
+            activity.clone(),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sock = socket_path(tmp.path());
+
+        // Hold the subscription open (not `send_command`, which is one-shot).
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write.write_all(b"subscribe\n").await.unwrap();
+        let mut reader = BufReader::new(read);
+
+        // A pulse on the activity channel must surface as a `changed` line.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        activity.send(()).unwrap();
+
+        let mut line = String::new();
+        let read = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line)).await;
+        assert!(read.is_ok(), "subscribe did not stream within the timeout");
+        assert_eq!(line.trim(), "changed");
 
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
