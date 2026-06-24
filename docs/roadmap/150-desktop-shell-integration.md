@@ -41,13 +41,36 @@ Progress:
   sync activity; the extension invalidates the files it has emblemed so Nautilus
   re-queries them — no manual refresh.
 
+- ✅ Bulk `status-dir` query + extension-side per-directory cache: a folder of N
+  files is one round-trip, not N.
+- ✅ Context-menu actions (`Nautilus.MenuProvider`): Open in Google Drive / Copy
+  Drive link / Open Google Doc, and Pause/Resume in a folder background.
+  Localised en/fr/es. Backed by `drive-url` + `pause-state` control commands.
+- ✅ Double-click a native-Doc shortcut opens it in the browser, via a MIME type
+  + desktop handler (`air-drive open-shortcut`) registered by `shell install`.
+
 Remaining:
 
-- Bulk `status-dir` query + extension-side caching so a folder of N files is one
-  round-trip instead of N (perf for large folders).
-- Context-menu actions and native notifications (conflict, blocked transitions).
-- Later: native (C) extension for the v1.0 bundle to drop the Python dep;
-  Dolphin/Nemo providers.
+- Native notifications on conflict and on transition to/from blocked. The daemon
+  already has the signals (`conflict_record`, `state_meta.blocked_kind`); needs a
+  notifier (libnotify / `notify-send` / the `notify-rust` crate) wired to those
+  transitions.
+
+Deferred to **[170 — v1.0 bundles](170-v1-bundles.md)** (packaging):
+
+- A **native extension** (drop the `python3-nautilus` runtime dep). Decided C
+  over Rust for the glue — `libnautilus-extension` has no Rust bindings, so a
+  Rust `cdylib` means hand-written GObject-interface FFI for throwaway glue;
+  C is the documented ~200-line path (logic still delegated to the `air-drive`
+  binary over the socket). **Belongs in packaging**: native `.so`s load only
+  from the *system* extensions dir (`/usr/lib/<arch>/nautilus/extensions-4/`,
+  root-only) — there is no user-local native-extension dir, so it cannot ship
+  via the current `~/.local` `shell install`; it must be installed system-wide
+  by the `.deb`/AppImage.
+
+Later:
+
+- Dolphin (KDE) / Nemo providers.
 
 ## Acceptance
 
