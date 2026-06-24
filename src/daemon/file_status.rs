@@ -49,6 +49,49 @@ pub async fn status_token(
     }
 }
 
+/// Status tokens for every tracked immediate child of the directory `abs_dir`,
+/// as `(child_name, token)` pairs — the bulk form behind the overlay's
+/// `status-dir` query, so a folder of N files costs one round-trip.
+///
+/// Two sources combine:
+/// - children that are tracked `sync_item`s directly under `abs_dir` (their
+///   per-file token), and
+/// - when `abs_dir` is the **parent** of the mapped root, the root folder
+///   itself, carrying its [`aggregate_token`] (the root has no `sync_item`).
+///
+/// A directory unrelated to the mapping yields an empty list (→ no emblems).
+pub async fn dir_status(
+    db: &Db,
+    mapping_id: MappingId,
+    local_root: &Path,
+    abs_dir: &Path,
+) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+
+    // The mapped root shown as a child of its parent directory.
+    if local_root.parent() == Some(abs_dir) {
+        if let Some(name) = local_root.file_name() {
+            out.push((
+                name.to_string_lossy().into_owned(),
+                aggregate_token(db).await,
+            ));
+        }
+    }
+
+    // Tracked children of `abs_dir` when it is the root or inside it.
+    if let Ok(rel) = abs_dir.strip_prefix(local_root) {
+        let dir_rel = rel.to_string_lossy().replace('\\', "/");
+        if let Ok(children) = items::list_child_states(db.connection(), mapping_id, &dir_rel).await
+        {
+            for (name, state) in children {
+                out.push((name, token_for_state(state)));
+            }
+        }
+    }
+
+    out
+}
+
 /// Overall sync state for the whole mapping, used for the emblem on the mapped
 /// root folder. Resolves to:
 ///
@@ -205,6 +248,71 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dir_status_lists_immediate_children_and_root_aggregate() {
+        use crate::state::items::ItemKind;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("state.db")).await.unwrap();
+        seed_mapping(&db).await;
+        let root = Path::new("/home/u/Drive");
+        let mid = MappingId(1);
+
+        items::insert(db.connection(), &item("a.txt", ItemState::Synced))
+            .await
+            .unwrap();
+        items::insert(db.connection(), &item("doc.gdoc", ItemState::Skipped))
+            .await
+            .unwrap();
+        items::insert(db.connection(), &item("sub/b.txt", ItemState::PendingLocal))
+            .await
+            .unwrap();
+        // A tracked subdirectory.
+        items::insert(
+            db.connection(),
+            &NewSyncItem {
+                mapping_id: mid,
+                relative_path: "sub".into(),
+                kind: ItemKind::Dir,
+                remote_id: Some("d".into()),
+                size: None,
+                md5: None,
+                local_inode: None,
+                last_synced_at: 0,
+                state: ItemState::Synced,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Root view: immediate children only (not sub/b.txt).
+        let mut top = dir_status(&db, mid, root, root).await;
+        top.sort();
+        assert_eq!(
+            top,
+            vec![
+                ("a.txt".to_string(), "synced"),
+                ("doc.gdoc".to_string(), "ignored"),
+                ("sub".to_string(), "synced"),
+            ]
+        );
+
+        // Subdirectory view.
+        let sub = dir_status(&db, mid, root, &root.join("sub")).await;
+        assert_eq!(sub, vec![("b.txt".to_string(), "pending")]);
+
+        // Parent of the mapped root → the root itself with its aggregate.
+        let parent = dir_status(&db, mid, root, Path::new("/home/u")).await;
+        assert_eq!(parent, vec![("Drive".to_string(), "synced")]);
+
+        // Unrelated directory → nothing.
+        assert!(
+            dir_status(&db, mid, root, Path::new("/etc"))
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]

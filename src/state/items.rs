@@ -456,6 +456,52 @@ pub async fn list_for_mapping(conn: &Connection, mapping_id: MappingId) -> Resul
     .map_err(Into::into)
 }
 
+/// Immediate tracked children of the directory at `dir_rel` (POSIX path; `""`
+/// means the mapped root): every live `sync_item` whose `relative_path` is
+/// exactly `dir_rel/<name>` with no further `/`. Returns `(child_name, state)`.
+///
+/// Used by the shell overlay's bulk `status-dir` query so a folder of N files
+/// costs one round-trip instead of N. The `LIKE` narrows to the subtree (with
+/// metacharacters escaped); the exact one-level match is finished in Rust.
+pub async fn list_child_states(
+    conn: &Connection,
+    mapping_id: MappingId,
+    dir_rel: &str,
+) -> Result<Vec<(String, ItemState)>> {
+    let prefix = if dir_rel.is_empty() {
+        String::new()
+    } else {
+        format!("{dir_rel}/")
+    };
+    let like = format!("{}%", escape_like(&prefix));
+    conn.call(move |c| {
+        let mut stmt = c.prepare(
+            "SELECT relative_path, state FROM sync_item
+             WHERE mapping_id = ?1 AND trashed_at IS NULL
+               AND relative_path LIKE ?2 ESCAPE '\\'",
+        )?;
+        let rows = stmt.query_map(params![mapping_id.0, like], |row| {
+            let path: String = row.get(0)?;
+            let state = ItemState::from_sql(&row.get::<_, String>(1)?, 1)?;
+            Ok((path, state))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (path, state) = row?;
+            // Keep only immediate children: the remainder past the prefix has no `/`.
+            let Some(rest) = path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if !rest.is_empty() && !rest.contains('/') {
+                out.push((rest.to_owned(), state));
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(Into::into)
+}
+
 /// List the live (non-tombstoned) skipped items of a mapping, ordered by path.
 ///
 /// Skipped items are things the daemon deliberately does not sync as opaque bytes —

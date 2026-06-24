@@ -8,12 +8,14 @@
 //!   the same underlying flag.
 //! - [`run_control_server`] — accepts connections on
 //!   `<runtime_dir>/control.sock` and handles: `pause`, `resume`,
-//!   `status-snapshot`, `status-path <abs>` (per-file sync status for the
-//!   desktop overlay, see [`crate::daemon::file_status`]), and `subscribe`. The
-//!   first four are one line in / one line out; `subscribe` is a long-lived
-//!   stream that emits `changed\n` on every sync activity so the overlay
-//!   refreshes emblems live. UNIX-only by design — the project is Linux-first
-//!   per constitution principle V.
+//!   `status-snapshot`, `status-path <abs>` and `status-dir <abs>` (per-file and
+//!   bulk-per-directory sync status for the desktop overlay, see
+//!   [`crate::daemon::file_status`]), and `subscribe`. The status/pause commands
+//!   are request/response (`status-dir` writes one `<token>\t<name>` line per
+//!   child, then closes); `subscribe` is a long-lived stream that emits
+//!   `changed\n` on every sync activity so the overlay refreshes emblems live.
+//!   UNIX-only by design — the project is Linux-first per constitution
+//!   principle V.
 //!
 //! Graceful shutdown is NOT a control-socket command: `air-drive stop` signals
 //! the daemon directly (SIGTERM via the lock-file PID), reusing the same signal
@@ -211,6 +213,18 @@ async fn handle_client(
         // Per-file status for the desktop overlay (see `file_status`).
         let token = file_status::status_token(&db, mapping_id, &local_root, Path::new(path)).await;
         format!("{token}\n")
+    } else if let Some(dir) = line.strip_prefix("status-dir ") {
+        // Bulk status for every tracked child of a directory: one
+        // `<token>\t<name>` line each, terminated by closing the connection.
+        let entries = file_status::dir_status(&db, mapping_id, &local_root, Path::new(dir)).await;
+        let mut body = String::new();
+        for (name, token) in entries {
+            body.push_str(token);
+            body.push('\t');
+            body.push_str(&name);
+            body.push('\n');
+        }
+        body
     } else {
         "error: unknown command\n".to_owned()
     };
@@ -238,6 +252,7 @@ pub async fn send_command(socket: &Path, command: &str) -> std::io::Result<Strin
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
 
     #[tokio::test]
     async fn pause_state_round_trip() {
@@ -387,6 +402,44 @@ mod tests {
         // Outside the mapped root.
         let r = send_command(&sock, "status-path /etc/hosts").await.unwrap();
         assert_eq!(r, "unknown");
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    }
+
+    #[tokio::test]
+    async fn control_server_answers_status_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PauseState::new();
+        let cancel = CancellationToken::new();
+        let (_db_tmp, db, mapping_id, local_root) = server_fixture().await;
+        let (activity, _) = broadcast::channel::<()>(8);
+
+        let server = tokio::spawn(run_control_server(
+            tmp.path().to_path_buf(),
+            state.clone(),
+            db,
+            mapping_id,
+            local_root,
+            activity,
+            cancel.clone(),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sock = socket_path(tmp.path());
+
+        // status-dir replies one `<token>\t<name>` line per child, then closes.
+        // The fixture seeds a single synced `notes.txt` under /home/u/Drive.
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(b"status-dir /home/u/Drive\n")
+            .await
+            .unwrap();
+        write.shutdown().await.unwrap();
+        let mut reader = BufReader::new(read);
+        let mut body = String::new();
+        reader.read_to_string(&mut body).await.unwrap();
+        assert_eq!(body, "synced\tnotes.txt\n");
 
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
