@@ -53,6 +53,15 @@ async fn us2_1_local_create_propagates() {
         "hello.txt should have reached Drive within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
         daemon.poll_alive()
     );
+    let settled = wait_until(T_LOCAL_TO_REMOTE, || async {
+        item_state(&fx, "hello.txt").as_deref() == Some("synced")
+    })
+    .await;
+    assert!(
+        settled,
+        "uploaded hello.txt must be marked synced, got {:?}",
+        item_state(&fx, "hello.txt")
+    );
     daemon.shutdown().await;
 }
 
@@ -422,6 +431,15 @@ async fn us2_2_remote_create_propagates_locally() {
         appeared,
         "remote create should land locally within {T_REMOTE_TO_LOCAL:?}; alive? {:?}",
         daemon.poll_alive()
+    );
+    let settled = wait_until(T_REMOTE_TO_LOCAL, || async {
+        item_state(&fx, "remote-create.txt").as_deref() == Some("synced")
+    })
+    .await;
+    assert!(
+        settled,
+        "downloaded remote-create.txt must be marked synced, got {:?}",
+        item_state(&fx, "remote-create.txt")
     );
     daemon.shutdown().await;
 }
@@ -1528,6 +1546,17 @@ struct SyncedItem<'a> {
 
 /// Seed account + mapping + drive_change_cursor (so the daemon skips initial-sync)
 /// + sync_item rows for any files that should already be "synced".
+fn item_state(fx: &FsFixture, relative_path: &str) -> Option<String> {
+    with_state_db(fx, |conn| {
+        conn.query_row(
+            "SELECT state FROM sync_item WHERE relative_path = ?1",
+            rusqlite::params![relative_path],
+            |r| r.get(0),
+        )
+        .ok()
+    })
+}
+
 fn seed_synced_state(fx: &FsFixture, mock: &DriveMock, root_id: &str, items: &[SyncedItem<'_>]) {
     seed_synced_state_with_dirs(fx, mock, root_id, &[], items);
 }

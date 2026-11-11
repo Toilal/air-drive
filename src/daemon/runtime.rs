@@ -283,6 +283,9 @@ async fn execute(
             // a no-op `mv`/`touch` or the watcher-echo of a Download we just
             // performed — skip the engine call entirely.
             if item.md5.as_deref() == Some(&md5) && item.size == Some(size) {
+                if item.remote_id.is_some() {
+                    items::mark_synced_if_pending(db.connection(), item.id).await?;
+                }
                 return Ok(());
             }
 
@@ -335,6 +338,7 @@ async fn execute(
                     .await?;
                 }
             }
+            items::mark_synced_if_pending(db.connection(), item.id).await?;
         }
 
         Operation::Download => {
@@ -362,6 +366,7 @@ async fn execute(
             if item.remote_id.as_deref() != Some(remote_id) {
                 items::set_remote_id(db.connection(), item.id, remote_id).await?;
             }
+            items::mark_synced_if_pending(db.connection(), item.id).await?;
         }
 
         Operation::DeleteRemote => {

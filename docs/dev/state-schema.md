@@ -16,7 +16,7 @@ sibling `src/state/*.rs` files.
 - `MIGRATIONS` is a **forward-only** ladder: `MIGRATIONS[i]` moves the DB from
   version `i` to `i + 1`. Each migration carries only the schema additions of
   its version.
-- The current `LATEST_VERSION` is **6**.
+- The current `LATEST_VERSION` is **7**.
 
 | Version | Adds                                                                                  |
 | ------- | ------------------------------------------------------------------------------------- |
@@ -26,6 +26,7 @@ sibling `src/state/*.rs` files.
 | v4      | `sync_item.trashed_at` (nullable epoch) — tombstone marker: a file trashed on Drive keeps its row (and `remote_id`) so a restore re-links instead of duplicating (#8). A start-up GC reclaims tombstones older than 30 days. |
 | v5      | Adds the `write_shortcut` operation to `pending_operation.op`. Native Google Docs are materialised as local shortcut files (#3); the dispatcher needs a dedicated op to write them. SQLite can't alter a CHECK in place, so the table is rebuilt with the extended `op` set (rows copied, index recreated). Nothing FK-references `pending_operation`, so the drop/rename is safe inside the migration transaction. |
 | v6      | Extends `state_meta.blocked_kind` with the recoverable `transient` kind (Drive briefly unreachable; cleared on the next successful Drive call, vs the terminal `auth`/`remote`/`mapping` kinds). SQLite can't alter a CHECK in place, so the singleton table is rebuilt with the widened set and its one row copied across. |
+| v7      | Data-only repair, no schema change. Promotes to `synced` every `pending_local` / `pending_remote` `sync_item` that is linked to Drive (`remote_id` set), has been transferred (`last_synced_at > 0`) and has no queued `pending_operation`. Rows created by continuous sync used to stay `pending_local` after a successful upload/download, so the shell overlay showed them as syncing forever. |
 
 To add a schema change: append a new `Vn_SCHEMA` constant, push it onto
 `MIGRATIONS`, and bump `LATEST_VERSION`. Never edit a shipped migration in place.

@@ -77,6 +77,12 @@ create_dir_local  create_dir_remote
 mark_conflict
 ```
 
+A path the reconciler sees for the first time is recorded as a `sync_item` in
+`pending_local` before its op is queued. Once the dispatcher completes the
+`upload` / `download` (or `create_dir_local`), the row moves to `synced`; this is
+the state the shell overlay reads for its per-file emblem. Only `pending_*` rows
+are promoted — a `conflict` or `skipped` row keeps its state.
+
 `delete_remote` (and the directory variant) is addressed **by Drive id**, not by
 path: the engine PATCHes `trashed=true` or issues a `files.delete`, depending on
 [`[sync].remote_deletes`](../user/configuration.md#sync--synchronisation-policy)
