@@ -381,6 +381,22 @@ pub async fn set_state(conn: &Connection, id: ItemId, state: ItemState) -> Resul
     .map_err(Into::into)
 }
 
+/// Promote an item to `synced` after a successful transfer, but only from a
+/// `pending_*` state: a `conflict` or `skipped` row is owned by another flow and
+/// must not be silently cleared.
+pub async fn mark_synced_if_pending(conn: &Connection, id: ItemId) -> Result<()> {
+    conn.call(move |c| {
+        c.execute(
+            "UPDATE sync_item SET state = 'synced'
+             WHERE id = ?1 AND state IN ('pending_local', 'pending_remote')",
+            params![id.0],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(Into::into)
+}
+
 /// Delete an item by id. Cascades into `pending_operation` and `conflict_record`.
 pub async fn delete(conn: &Connection, id: ItemId) -> Result<()> {
     conn.call(move |c| {
@@ -830,6 +846,31 @@ mod tests {
         assert_eq!(item.size, Some(999));
         assert_eq!(item.md5.as_deref(), Some("cafebabe"));
         assert_eq!(item.last_synced_at, 9999);
+    }
+
+    #[tokio::test]
+    async fn mark_synced_if_pending_only_promotes_pending_rows() {
+        let (_tmp, db, mapping_id) = open_temp_with_mapping().await;
+        let cases = [
+            ("pl", ItemState::PendingLocal, ItemState::Synced),
+            ("pr", ItemState::PendingRemote, ItemState::Synced),
+            ("c", ItemState::Conflict, ItemState::Conflict),
+            ("s", ItemState::Skipped, ItemState::Skipped),
+        ];
+        for (path, initial, expected) in cases {
+            let id = insert(
+                db.connection(),
+                &NewSyncItem {
+                    state: initial,
+                    ..sample(mapping_id, path)
+                },
+            )
+            .await
+            .unwrap();
+            mark_synced_if_pending(db.connection(), id).await.unwrap();
+            let item = get_by_id(db.connection(), id).await.unwrap().unwrap();
+            assert_eq!(item.state, expected, "{path}");
+        }
     }
 
     #[tokio::test]

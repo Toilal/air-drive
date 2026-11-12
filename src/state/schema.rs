@@ -13,7 +13,7 @@
 //! `specs/001-minimal-sync-daemon/data-model.md`.
 
 /// Latest schema version this binary knows how to apply.
-pub const LATEST_VERSION: i64 = 6;
+pub const LATEST_VERSION: i64 = 7;
 
 /// Unconditional bootstrap: ensures `schema_version` exists so the migration runner can
 /// always read it. Idempotent.
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 /// version `i` to `i+1`. The bootstrap step above already created `schema_version` so
 /// migrations only carry the **schema additions** of their version.
 pub const MIGRATIONS: &[&str] = &[
-    V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA, V5_SCHEMA, V6_SCHEMA,
+    V1_SCHEMA, V2_SCHEMA, V3_SCHEMA, V4_SCHEMA, V5_SCHEMA, V6_SCHEMA, V7_SCHEMA,
 ];
 
 // `LATEST_VERSION` must equal the number of migrations: the runner derives each
@@ -196,6 +196,19 @@ FROM state_meta;
 
 DROP TABLE state_meta;
 ALTER TABLE state_meta_v6 RENAME TO state_meta;
+"#;
+
+/// v7 — data-only repair. Successful uploads/downloads of newly-created items
+/// left their row in `pending_local` although the transfer completed, so the shell
+/// overlay showed them as syncing forever. A row is promoted to `synced` when it
+/// is linked to Drive, has been transferred at least once, and has no queued op.
+const V7_SCHEMA: &str = r#"
+UPDATE sync_item
+SET state = 'synced'
+WHERE state IN ('pending_local', 'pending_remote')
+  AND remote_id IS NOT NULL
+  AND last_synced_at > 0
+  AND id NOT IN (SELECT sync_item_id FROM pending_operation);
 "#;
 
 /// v3 — persist the original `<remote-folder>` CLI spec on the mapping row.

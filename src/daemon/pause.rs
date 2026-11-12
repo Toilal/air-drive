@@ -141,7 +141,7 @@ pub async fn run_control_server(
                     )
                     .await
                     {
-                        tracing::warn!(error = %e, "control client failed");
+                        tracing::debug!(error = %e, "control client failed");
                     }
                 });
             }

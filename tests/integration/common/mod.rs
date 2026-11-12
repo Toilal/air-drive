@@ -523,13 +523,20 @@ impl Match for FailMatcher {
 struct FailResponder(Arc<AtomicUsize>);
 impl Respond for FailResponder {
     fn respond(&self, _req: &Request) -> ResponseTemplate {
-        // Saturating decrement so a race that drops below zero rolls back to zero
-        // on the next read.
-        let _ = self
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(1))
-            });
+        // Saturating decrement. A CAS loop rather than `fetch_update`, which is
+        // deprecated on recent toolchains while its replacement is newer than the MSRV.
+        let mut current = self.0.load(Ordering::Relaxed);
+        while current > 0 {
+            match self.0.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
         ResponseTemplate::new(503)
     }
 }
