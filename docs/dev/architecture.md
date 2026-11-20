@@ -27,7 +27,10 @@ design, see [`../../CLAUDE.md`](../../CLAUDE.md).
 
 Everything is coordinated behind a single
 `tokio_util::sync::CancellationToken`. `SIGTERM` / `SIGINT` flip the token, the
-loops drain whatever is in flight, and `daemon::run` returns cleanly.
+loops drain whatever is in flight, and `daemon::run` returns cleanly. The drain
+is bounded: tasks still running 20 s after cancellation are aborted (an aborted
+in-flight transfer stays `pending` and re-runs next start), so shutdown always
+completes inside systemd's stop timeout.
 
 ## Module layout (`src/`)
 

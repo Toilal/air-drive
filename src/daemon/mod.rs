@@ -302,30 +302,42 @@ pub async fn run(ctx: DaemonContext, cancel: CancellationToken) -> Result<()> {
         })
     };
 
-    // Wait for all tasks. The signal task may complete first (triggers cancel);
-    // the others drain and return after.
-    let _ = signal_task.await;
-    let _ = raw_forwarder.await;
-    let _ = debounce_task.await;
-    let _ = reconcile_local_task.await;
-    let _ = poller_task.await;
-    let _ = reconcile_remote_task.await;
-    // The dispatcher may be mid-transfer (an rclone subprocess). All loops are
-    // cancel-guarded between ops, so it returns promptly when idle; bound the
-    // wait so an in-flight transfer can't hold shutdown open indefinitely. On
-    // timeout, abort the task — dropping its future kills the rclone child
-    // (`kill_on_drop`); the op stays `pending` and re-runs (idempotently) next
-    // start.
-    let mut dispatcher_task = dispatcher_task;
-    if tokio::time::timeout(Duration::from_secs(20), &mut dispatcher_task)
-        .await
-        .is_err()
-    {
-        tracing::warn!("dispatcher still draining at shutdown — aborting in-flight transfer");
-        dispatcher_task.abort();
-    }
-    let _ = control_task.await;
+    cancel.cancelled().await;
+    signal_task.abort();
+
+    // Every loop is cancel-guarded and normally returns promptly, but a task can
+    // still be parked on an in-flight call (an rclone transfer, a Drive request).
+    // Bound the drain so shutdown always finishes well inside systemd's stop
+    // timeout. Aborting the dispatcher drops its future, which kills the rclone
+    // child (`kill_on_drop`); the op stays `pending` and re-runs (idempotently)
+    // next start.
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+    join_until_deadline("raw-forwarder", raw_forwarder, deadline).await;
+    join_until_deadline("debouncer", debounce_task, deadline).await;
+    join_until_deadline("local-reconciler", reconcile_local_task, deadline).await;
+    join_until_deadline("change-poller", poller_task, deadline).await;
+    join_until_deadline("remote-reconciler", reconcile_remote_task, deadline).await;
+    join_until_deadline("dispatcher", dispatcher_task, deadline).await;
+    join_until_deadline("control-socket", control_task, deadline).await;
     Ok(())
+}
+
+/// How long shutdown waits, in total, for the daemon's tasks to drain after the
+/// cancellation token fires before aborting the stragglers.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+
+async fn join_until_deadline<T>(
+    name: &str,
+    mut task: tokio::task::JoinHandle<T>,
+    deadline: tokio::time::Instant,
+) {
+    if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+        tracing::warn!(
+            task = name,
+            "task still running at shutdown deadline — aborting"
+        );
+        task.abort();
+    }
 }
 
 /// Spawn a small task that pumps events from the watcher's mpsc into the
