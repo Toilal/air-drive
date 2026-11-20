@@ -14,6 +14,7 @@ use std::path::Path;
 
 use crate::cli::{ExitCode, runtime};
 use crate::config::Config;
+use crate::drive::auth::AuthMode;
 use crate::drive::metadata;
 use crate::error::Result;
 use crate::state::accounts;
@@ -30,7 +31,7 @@ pub async fn run(
     account_label: Option<String>,
 ) -> Result<ExitCode> {
     let paths = runtime::resolve_paths(config_dir_override)?;
-    let token = runtime::build_token_provider(cfg, &paths).await?;
+    let token = runtime::build_token_provider(cfg, &paths, AuthMode::Interactive).await?;
     let http = runtime::build_drive_http(token)?;
     let about = metadata::about_user(&http).await?;
     let db = runtime::open_state(&paths).await?;

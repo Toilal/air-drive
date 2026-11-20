@@ -97,7 +97,10 @@ air-drive stop
 ### `status`
 
 Print the current daemon state (account, mapping, pending counters, blocked
-state, unresolved conflicts, and any skipped items).
+state, unresolved conflicts, and any skipped items). When the daemon is
+`blocked`, a `blocked by` line gives the reason: `auth` (run `air-drive link`),
+`remote` (watched Drive folder removed), `mapping` (local folder missing), or
+`transient` (Drive unreachable; clears on its own).
 
 ```sh
 air-drive status [--json]
