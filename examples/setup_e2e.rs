@@ -45,7 +45,7 @@ use std::process::Command;
 use clap::Parser;
 
 use air_drive::config::OauthConfig;
-use air_drive::drive::auth::{TOKENS_FILE, build_provider};
+use air_drive::drive::auth::{AuthMode, TOKENS_FILE, build_provider};
 use air_drive::drive::http::DriveHttp;
 use air_drive::drive::metadata;
 
@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: Some(args.client_id.clone()),
         client_secret: Some(args.client_secret.clone()),
     };
-    let provider = build_provider(&oauth, &args.config_dir, None).await?;
+    let provider = build_provider(&oauth, &args.config_dir, None, AuthMode::Interactive).await?;
     // Force a token fetch so the persistence callback runs.
     let _access = provider.token().await?;
     // yup-oauth2 flushes tokens.json slightly *after* `token()` returns, so a read

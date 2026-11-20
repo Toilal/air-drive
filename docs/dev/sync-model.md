@@ -240,6 +240,23 @@ The first subsequent successful Drive call — a poll, or any dispatcher op —
 clears it (`meta::clear_if_transient`, which leaves the terminal kinds in place),
 so `status` reports healthy again on its own once Drive recovers.
 
+### Access-token refresh
+
+The daemon never runs an interactive OAuth flow — only `air-drive link` does.
+It uses a refresh-only token provider (`drive::refresh`) that renews the access
+token from the refresh token stored in `tokens.json` and classifies failures:
+
+- connection failure, timeout, `429` or `5xx` from the token endpoint →
+  `Error::Network`, handled like any other transient Drive failure (retried on
+  the next tick, `transient` block);
+- any other rejection (`invalid_grant` — revoked, or past the 7-day cap of a
+  `Testing` OAuth client — `invalid_client`, …) or a missing refresh token →
+  `Error::Oauth`, which sets the terminal `auth` block.
+
+Whenever the cached access token is stale the provider re-reads `tokens.json`,
+so the tokens written by `air-drive link` are picked up by a running daemon
+without a restart (`link` also clears the `auth` block).
+
 ## Startup catch-up
 
 The event paths only see changes that happen *while the daemon runs*. A change

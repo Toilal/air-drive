@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::interactive;
 use crate::cli::{ExitCode, runtime};
 use crate::config::Config;
+use crate::drive::auth::AuthMode;
 use crate::drive::metadata;
 use crate::error::{Error, Result};
 use crate::state::accounts::AccountId;
@@ -29,7 +30,7 @@ pub async fn run(
     remote_folder: String,
 ) -> Result<ExitCode> {
     let paths = runtime::resolve_paths(config_dir_override)?;
-    let token = runtime::build_token_provider(cfg, &paths).await?;
+    let token = runtime::build_token_provider(cfg, &paths, AuthMode::Interactive).await?;
     let http = runtime::build_drive_http(token)?;
 
     // 1. Local path: canonicalise; create only when authorised (config flag

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::config::paths::Paths;
-use crate::drive::auth::{TokenProvider, build_provider};
+use crate::drive::auth::{AuthMode, TokenProvider, build_provider};
 use crate::drive::http::DriveHttp;
 use crate::engine::SyncEngine;
 use crate::engine::http::HttpEngine;
@@ -64,9 +64,13 @@ pub async fn open_state(paths: &Paths) -> Result<Db> {
 /// Build the token provider, honouring `AIR_DRIVE_TEST_BEARER_TOKEN` for integration
 /// tests. Read once here so the daemon code path never has to call
 /// `std::env::set_var` (unsafe under Rust 2024).
-pub async fn build_token_provider(cfg: &Config, paths: &Paths) -> Result<Arc<dyn TokenProvider>> {
+pub async fn build_token_provider(
+    cfg: &Config,
+    paths: &Paths,
+    mode: AuthMode,
+) -> Result<Arc<dyn TokenProvider>> {
     let override_tok = std::env::var("AIR_DRIVE_TEST_BEARER_TOKEN").ok();
-    build_provider(&cfg.oauth, paths.config(), override_tok.as_deref()).await
+    build_provider(&cfg.oauth, paths.config(), override_tok.as_deref(), mode).await
 }
 
 /// Build the [`DriveHttp`] client with env-driven URL overrides (`AIR_DRIVE_DRIVE_BASE_URL`

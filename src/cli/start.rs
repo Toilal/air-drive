@@ -14,6 +14,7 @@ use crate::cli::interactive;
 use crate::cli::{ExitCode, runtime};
 use crate::config::Config;
 use crate::daemon::{DaemonContext, lock::Lock};
+use crate::drive::auth::AuthMode;
 use crate::drive::http::DriveHttp;
 use crate::drive::metadata;
 use crate::error::{Error, Result};
@@ -92,7 +93,7 @@ pub async fn run(
     }
 
     // 4. Build the engine + HTTP client.
-    let token = runtime::build_token_provider(cfg, &paths).await?;
+    let token = runtime::build_token_provider(cfg, &paths, AuthMode::RefreshOnly).await?;
     let http = runtime::build_drive_http(token.clone())?;
     let local_root = std::path::PathBuf::from(&mapping_row.local_path);
     // Pre-flight: the watcher will inotify-subscribe to `local_root` shortly,
