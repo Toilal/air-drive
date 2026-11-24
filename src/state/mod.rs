@@ -274,6 +274,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v8_promotes_remote_linked_pending_dirs_to_synced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(schema::BOOTSTRAP).unwrap();
+            for (idx, sql) in schema::MIGRATIONS.iter().take(7).enumerate() {
+                conn.execute_batch(sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?1, 0)",
+                    params![(idx + 1) as i64],
+                )
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO account (id, email, created_at, linked_at) VALUES (1, 'a@x', 0, 0);
+                 INSERT INTO folder_mapping (id, account_id, local_path, remote_folder_id, created_at)
+                     VALUES (1, 1, '/l', 'root', 0);
+                 INSERT INTO sync_item (id, mapping_id, relative_path, kind, remote_id, last_synced_at, state)
+                 VALUES
+                     (1, 1, 'created', 'dir', 'd1', 0, 'pending_local'),
+                     (2, 1, 'not-yet-created', 'dir', NULL, 0, 'pending_local'),
+                     (3, 1, 'queued', 'dir', 'd3', 0, 'pending_local'),
+                     (4, 1, 'file', 'file', 'f4', 0, 'pending_local');
+                 INSERT INTO pending_operation (sync_item_id, op, next_attempt_at, enqueued_at)
+                     VALUES (3, 'create_dir_remote', 0, 0);",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).await.unwrap();
+        let states: Vec<String> = db
+            .connection()
+            .call(|c| {
+                let mut stmt = c.prepare("SELECT state FROM sync_item ORDER BY id")?;
+                let rows = stmt.query_map([], |r| r.get(0))?;
+                Ok(rows.collect::<std::result::Result<Vec<String>, _>>()?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            states,
+            vec!["synced", "pending_local", "pending_local", "pending_local"]
+        );
+    }
+
+    #[tokio::test]
     async fn delete_account_cascades_to_dependent_rows() {
         use crate::state::{accounts, conflicts, cursor, items, mapping, ops};
         let (_tmp, db) = open_temp().await;
