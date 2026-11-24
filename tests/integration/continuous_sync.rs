@@ -758,6 +758,15 @@ async fn us2_6_local_empty_dir_create_propagates() {
         "empty dir should appear on Drive within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
         daemon.poll_alive()
     );
+    let settled = wait_until(T_LOCAL_TO_REMOTE, || async {
+        item_state(&fx, "newdir").as_deref() == Some("synced")
+    })
+    .await;
+    assert!(
+        settled,
+        "newdir created on Drive must be marked synced, got {:?}",
+        item_state(&fx, "newdir")
+    );
     daemon.shutdown().await;
 }
 
@@ -1461,6 +1470,17 @@ async fn us2_11_local_new_dir_with_nested_file_propagates() {
         converged,
         "newdir/note.txt should reach Drive within {T_LOCAL_TO_REMOTE:?}; alive? {:?}",
         daemon.poll_alive()
+    );
+    let settled = wait_until(T_LOCAL_TO_REMOTE, || async {
+        item_state(&fx, "newdir").as_deref() == Some("synced")
+            && item_state(&fx, "newdir/note.txt").as_deref() == Some("synced")
+    })
+    .await;
+    assert!(
+        settled,
+        "newdir and its file must be marked synced, got {:?} / {:?}",
+        item_state(&fx, "newdir"),
+        item_state(&fx, "newdir/note.txt")
     );
     daemon.shutdown().await;
 }

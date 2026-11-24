@@ -610,7 +610,8 @@ async fn ensure_remote_folder(
 }
 
 /// Record a folder as a `kind='dir'` `sync_item` (insert if absent, otherwise
-/// ensure its `remote_id` is set). Keyed by `(mapping_id, relative_path)`, whose
+/// ensure its `remote_id` is set and promote a `pending_*` row to `synced`: the
+/// folder now exists on Drive). Keyed by `(mapping_id, relative_path)`, whose
 /// UNIQUE index makes a racing insert from the poller's `apply_remote` fail
 /// rather than create a duplicate.
 async fn persist_dir(db: &Db, mapping_id: MappingId, rel: &str, remote_id: &str) -> Result<()> {
@@ -619,6 +620,7 @@ async fn persist_dir(db: &Db, mapping_id: MappingId, rel: &str, remote_id: &str)
             if existing.remote_id.as_deref() != Some(remote_id) {
                 items::set_remote_id(db.connection(), existing.id, remote_id).await?;
             }
+            items::mark_synced_if_pending(db.connection(), existing.id).await?;
         }
         None => {
             items::insert(
