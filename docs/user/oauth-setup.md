@@ -19,7 +19,10 @@ This is a deliberate, constitution-level decision; see
 
 Google classifies `drive` as a **sensitive** scope. OAuth clients left in
 `Testing` mode on the consent screen work fine but **cap refresh-token lifetime
-at 7 days** — so the daemon will prompt for re-consent roughly once a week.
+at 7 days** — so you will need to re-run `air-drive link` roughly once a week.
+The daemon itself never opens a consent page: when Google rejects the refresh
+token, `air-drive status` reports `blocked` with an `auth` reason, and the
+running daemon resumes on its own once `air-drive link` has stored new tokens.
 
 There are two ways to escape the cap for personal use, neither of which needs
 Google's full verification review:

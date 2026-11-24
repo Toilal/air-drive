@@ -1,6 +1,6 @@
 //! OAuth / token acquisition for the Drive API.
 //!
-//! Two implementations of [`TokenProvider`] live in this module:
+//! Three implementations of [`TokenProvider`] are selected by [`build_provider`]:
 //!
 //! - [`StaticToken`] — fixed access token used by integration tests via
 //!   `AIR_DRIVE_TEST_BEARER_TOKEN`. The factory short-circuits the OAuth dance whenever
@@ -10,7 +10,11 @@
 //!   a `client_id` and a `client_secret` at the token endpoint, distributed together
 //!   with the app — the "secret" is a public identifier in this flow (cf. rclone,
 //!   gcloud, Insync), the real auth proof is PKCE. Both are passed via
-//!   `Config.oauth.client_id` + `Config.oauth.client_secret`.
+//!   `Config.oauth.client_id` + `Config.oauth.client_secret`. Used by interactive
+//!   commands (`link`, `map`) only: it falls back to the browser consent flow
+//!   whenever a refresh fails.
+//! - [`RefreshOnlyProvider`] — used by the daemon, which must never start an
+//!   interactive flow; a failed refresh is surfaced as an error instead.
 //!
 //! Token storage lives at `<config_dir>/tokens.json`. The file MUST be `0600` — the
 //! factory refuses to start otherwise.
@@ -24,6 +28,7 @@ use time::OffsetDateTime;
 use yup_oauth2::{ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
 use crate::config::OauthConfig;
+use crate::drive::refresh::RefreshOnlyProvider;
 use crate::error::{Error, Result};
 
 /// Project-owned Google OAuth client ID used when `[oauth].client_id` is unset.
@@ -192,6 +197,16 @@ fn read_refresh_token(tokens_path: &Path) -> Result<Option<String>> {
         .map(str::to_owned))
 }
 
+/// Whether the token provider may ask the user to authorize in a browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// Foreground commands (`link`, `map`): a missing or rejected refresh token
+    /// starts the browser consent flow.
+    Interactive,
+    /// The daemon: only refresh the stored token; never prompt.
+    RefreshOnly,
+}
+
 /// Decide which provider to use and return it behind `Arc<dyn TokenProvider>`.
 ///
 /// Resolution order:
@@ -200,13 +215,15 @@ fn read_refresh_token(tokens_path: &Path) -> Result<Option<String>> {
 ///    integration test harness via `AIR_DRIVE_TEST_BEARER_TOKEN` (read once at CLI
 ///    startup so we never touch `std::env::set_var` from the daemon code path —
 ///    `set_var` is `unsafe` under Rust 2024 and the crate forbids `unsafe_code`).
-/// 2. Otherwise build a [`YupOAuthProvider`] backed by `tokens.json` in `config_dir`.
-///    The token file MUST be `0600` if it already exists; missing is OK (yup-oauth2
-///    will create it on first use).
+/// 2. Otherwise, backed by `tokens.json` in `config_dir` (which MUST be `0600` if it
+///    already exists): a [`YupOAuthProvider`] in [`AuthMode::Interactive`] (missing is
+///    OK, yup-oauth2 creates it on first use), or a [`RefreshOnlyProvider`] in
+///    [`AuthMode::RefreshOnly`].
 pub async fn build_provider(
     oauth: &OauthConfig,
     config_dir: &Path,
     test_bearer_override: Option<&str>,
+    mode: AuthMode,
 ) -> Result<Arc<dyn TokenProvider>> {
     if let Some(tok) = test_bearer_override {
         if !tok.is_empty() {
@@ -218,6 +235,14 @@ pub async fn build_provider(
     enforce_owner_only_if_exists(&tokens_path)?;
 
     let secret = build_application_secret(oauth);
+    if mode == AuthMode::RefreshOnly {
+        return Ok(Arc::new(RefreshOnlyProvider::new(
+            secret.client_id,
+            secret.client_secret,
+            secret.token_uri,
+            tokens_path,
+        )?));
+    }
     let auth = InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
         .flow_delegate(Box::new(BrowserOpeningDelegate))
         .persist_tokens_to_disk(&tokens_path)
@@ -444,10 +469,15 @@ mod tests {
     #[tokio::test]
     async fn factory_honours_test_bearer_override() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = build_provider(&OauthConfig::default(), tmp.path(), Some("fixed-tok"))
-            .await
-            .map_err(|e| format!("{e:?}"))
-            .unwrap();
+        let p = build_provider(
+            &OauthConfig::default(),
+            tmp.path(),
+            Some("fixed-tok"),
+            AuthMode::Interactive,
+        )
+        .await
+        .map_err(|e| format!("{e:?}"))
+        .unwrap();
         assert_eq!(p.token().await.unwrap(), "fixed-tok");
     }
 
@@ -466,7 +496,14 @@ mod tests {
             let mut perms = std::fs::metadata(&path).unwrap().permissions();
             perms.set_mode(0o644);
             std::fs::set_permissions(&path, perms).unwrap();
-            match build_provider(&OauthConfig::default(), tmp.path(), Some("")).await {
+            match build_provider(
+                &OauthConfig::default(),
+                tmp.path(),
+                Some(""),
+                AuthMode::Interactive,
+            )
+            .await
+            {
                 Err(Error::InsecurePermissions { .. }) => {}
                 Err(other) => panic!("empty override should hit perms check, got {other:?}"),
                 Ok(_) => panic!("empty override should not return a provider"),
@@ -484,7 +521,14 @@ mod tests {
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o644); // too loose
         std::fs::set_permissions(&path, perms).unwrap();
-        let err = match build_provider(&OauthConfig::default(), tmp.path(), None).await {
+        let err = match build_provider(
+            &OauthConfig::default(),
+            tmp.path(),
+            None,
+            AuthMode::RefreshOnly,
+        )
+        .await
+        {
             Ok(_) => panic!("0644 tokens.json must be rejected"),
             Err(e) => e,
         };

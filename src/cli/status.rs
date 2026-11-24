@@ -185,6 +185,17 @@ pub async fn collect(db: &Db, pid: Option<u32>) -> Result<Value> {
 /// terse — the JSON form is the source of truth.
 fn print_human(s: &Value) {
     println!("state          : {}", s["state"].as_str().unwrap_or("?"));
+    if let Value::Object(e) = &s["last_error"] {
+        println!(
+            "blocked by     : [{}] {} (since {})",
+            e["kind"].as_str().unwrap_or("?"),
+            e["message"].as_str().unwrap_or("?"),
+            e.get("at")
+                .and_then(|v| v.as_i64())
+                .map(format_unix)
+                .unwrap_or_else(|| "?".into())
+        );
+    }
     match &s["account"] {
         Value::Object(o) => println!(
             "account        : {} (linked {})",

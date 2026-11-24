@@ -27,7 +27,10 @@ design, see [`../../CLAUDE.md`](../../CLAUDE.md).
 
 Everything is coordinated behind a single
 `tokio_util::sync::CancellationToken`. `SIGTERM` / `SIGINT` flip the token, the
-loops drain whatever is in flight, and `daemon::run` returns cleanly.
+loops drain whatever is in flight, and `daemon::run` returns cleanly. The drain
+is bounded: tasks still running 20 s after cancellation are aborted (an aborted
+in-flight transfer stays `pending` and re-runs next start), so shutdown always
+completes inside systemd's stop timeout.
 
 ## Module layout (`src/`)
 
@@ -36,7 +39,7 @@ loops drain whatever is in flight, and `daemon::run` returns cleanly.
 | `cli/`        | Argument parsing (`clap`) and one handler per subcommand. Resolves paths + config, then dispatches. |
 | `config/`     | `config.toml` schema (`mod.rs`), XDG path resolution (`paths.rs`), comment-preserving auto-migration (`migrate.rs`). |
 | `daemon/`     | Orchestration: the event loop (`mod.rs`), the op dispatcher (`runtime.rs`), single-instance lock (`lock.rs`), the control socket (`pause.rs`: pause/resume + `status-path` per-file status + `subscribe` live-activity stream), per-file status derivation for the shell overlay (`file_status.rs`), in-flight op tracking (`in_flight.rs`). |
-| `drive/`      | Google Drive REST client: OAuth (`auth.rs`), HTTP plumbing (`http.rs`), `changes.list` polling (`changes.rs`), metadata helpers (`metadata.rs`). |
+| `drive/`      | Google Drive REST client: OAuth (`auth.rs`, plus the daemon's refresh-only provider in `refresh.rs`), HTTP plumbing (`http.rs`), `changes.list` polling (`changes.rs`), metadata helpers (`metadata.rs`). |
 | `engine/`     | The `SyncEngine` trait (`mod.rs`) and its implementations: `RcloneEngine` (`rclone.rs`), an HTTP-based engine (`http.rs`), rclone binary resolution (`rclone_path.rs`), verified auto-download (`rclone_download.rs`), staging dirs (`staging.rs`). |
 | `reconcile/`  | Turns events into operations: the one-shot initial pass (`mod.rs`), continuous `apply_local`/`apply_remote` (`continuous.rs`), conflict handling (`conflict.rs`), content fingerprinting (`fingerprint.rs`), native-doc shortcut files (`shortcut.rs`). |
 | `state/`      | SQLite persistence: schema + migrations (`schema.rs`), and typed accessors per table (`accounts.rs`, `mapping.rs`, `items.rs`, `ops.rs`, `cursor.rs`, `conflicts.rs`, `meta.rs`). |
